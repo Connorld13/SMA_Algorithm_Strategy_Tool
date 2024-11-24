@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), increment=5, start_amount=10000.0):
+def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), increment=5, start_amount=10000.0, progress_callback=None):
     """
     Run the SMA trading strategy converted from MATLAB code.
 
@@ -14,6 +14,7 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
         sma2_range (tuple): Tuple containing the start and end values for SMA2.
         increment (int): Increment value for SMA ranges.
         start_amount (float): Initial amount to start trading with.
+        progress_callback (function, optional): Function to report progress.
 
     Returns:
         dict: Results containing the best parameters and performance metrics for each ticker.
@@ -53,14 +54,16 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
         combinations = (((aend - astart) // inc) + 1) * (((bend - bstart) // inc) + 1)
         iterations = 0
 
-        # Adjusted loop order to match MATLAB (outer loop over SMA1)
+        # Outer loop over SMA1
         for a in range(astart, aend + 1, inc):
             # Compute SMA1 without shifting
             stock_data['SMA1'] = stock_data['Close'].rolling(window=a).mean()
 
+            # Inner loop over SMA2
             for b in range(bstart, bend + 1, inc):
-                if a == b:
-                    continue  # Skip if SMA1 period is equal to SMA2 period
+                # Remove the condition to skip when a == b
+                # if a == b:
+                #     continue  # Skip if SMA1 period is equal to SMA2 period
 
                 # Compute SMA2 without shifting
                 stock_data['SMA2'] = stock_data['Close'].rolling(window=b).mean()
@@ -83,7 +86,7 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
                     # Ensure SMADiff and SMADiff_Change are valid
                     if pd.isna(stock_data.at[idx, 'SMADiff']) or pd.isna(stock_data.at[idx - 1, 'SMADiff']):
                         continue
-                    smadiff_change = stock_data.at[idx, 'SMADiff'] - stock_data.at[idx - 1, 'SMADiff']
+                    smadiff_change = stock_data.at[idx, 'SMADiff_Change']
                     if smadiff_change > 0 and pos == 0:
                         # Buy signal
                         stock_data.at[idx, 'Position'] = 1
@@ -98,11 +101,15 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
                         stock_data.at[idx, 'Position'] = 0
 
                 # Handle open position at the end of data
+                # To match MATLAB, we will **not** close open positions explicitly
+                # Uncomment the following block if you prefer closing positions in Python
+                """
                 if pos == 1:
                     idx = numrows - 1
                     stock_data.at[idx, 'Position'] = -1
                     buysells.append((idx, -1))
                     pos = 0
+                """
 
                 # Simulate trades
                 trades = []
@@ -121,35 +128,36 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
                     continue  # Need at least one buy and one sell
 
                 # Initialize trades_df with correct data types
-                trades_df = pd.DataFrame(trades)
-
-                # Explicitly set data types of columns
-                trades_df = trades_df.astype({
+                trades_df = pd.DataFrame(trades).astype({
                     'TradeNumber': 'int64',
                     'Buy/Sell': 'int64',
                     'Date': 'datetime64[ns]',
                     'Price': 'float64'
                 })
 
-                # Initialize other columns with correct data types
-                trades_df['Return'] = pd.Series(0.0, index=trades_df.index, dtype='float64')
-                trades_df['HoldTime'] = pd.Series(0, index=trades_df.index, dtype='int64')
-                trades_df['CumulativeReturn'] = pd.Series(0.0, index=trades_df.index, dtype='float64')
-                trades_df['Liquidity'] = pd.Series(np.nan, index=trades_df.index, dtype='float64')
-                trades_df['P/L'] = pd.Series(0.0, index=trades_df.index, dtype='float64')
+                # Initialize other columns
+                trades_df['Return'] = 0.0
+                trades_df['HoldTime'] = 0
+                trades_df['CumulativeReturn'] = 0.0
+                trades_df['Liquidity'] = np.nan
+                trades_df['P/L'] = 0.0
 
                 # Set starting amount
                 trades_df.at[0, 'Liquidity'] = float(start_amount)
 
                 # Calculate returns and hold times
                 for i in range(1, len(trades_df), 2):
-                    buy_price = trades_df.at[i - 1, 'Price']
-                    sell_price = trades_df.at[i, 'Price']
+                    if i >= len(trades_df):
+                        break  # Prevent out-of-bounds
+                    buy_trade = trades_df.iloc[i - 1]
+                    sell_trade = trades_df.iloc[i]
+                    buy_price = buy_trade['Price']
+                    sell_price = sell_trade['Price']
                     trades_df.at[i, 'Return'] = (sell_price - buy_price) / buy_price
-                    buy_date = trades_df.at[i - 1, 'Date']
-                    sell_date = trades_df.at[i, 'Date']
+                    buy_date = buy_trade['Date']
+                    sell_date = sell_trade['Date']
                     hold_time = (sell_date - buy_date).days
-                    trades_df.at[i, 'HoldTime'] = int(hold_time)  # ensure integer
+                    trades_df.at[i, 'HoldTime'] = hold_time  # already integer
 
                     # Update cumulative return and liquidity
                     if i == 1:
@@ -173,10 +181,9 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
                 under1yearpl = 0.0
                 over1yearpl = 0.0
                 for i in range(1, len(trades_df), 2):
-                    if i == 1:
-                        pl = trades_df.at[i, 'Liquidity'] - float(start_amount)
-                    else:
-                        pl = trades_df.at[i, 'Liquidity'] - trades_df.at[i - 2, 'Liquidity']
+                    if i >= len(trades_df):
+                        break
+                    pl = trades_df.at[i, 'Liquidity'] - (trades_df.at[i - 2, 'Liquidity'] if i >= 2 else float(start_amount))
                     hold_time = trades_df.at[i, 'HoldTime']
                     if hold_time < 365:
                         under1yearpl += pl
@@ -195,6 +202,10 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
                 endtaxedliquidity = float(start_amount) + taxcumpl
                 taxcumreturn = (endtaxedliquidity / float(start_amount)) - 1
 
+                # Debugging: Print taxcumreturn for a specific combination
+                if a == 175 and b == 135:
+                    print(f"Debug - a: {a}, b: {b}, Taxed Return: {taxcumreturn}")
+
                 # Calculate buy-and-hold return without algorithm
                 first_price = stock_data.iloc[0]['Close']
                 last_price = stock_data.iloc[-1]['Close']
@@ -208,13 +219,11 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
                 else:
                     noalgoreturn = raw_return  # No tax if return is negative
 
-                # Calculate better off metric
-                if noalgoreturn < 0 and taxcumreturn >= 0:
-                    betteroff = (taxcumreturn - noalgoreturn) / abs(noalgoreturn)
-                elif noalgoreturn > 0:
-                    betteroff = (taxcumreturn / noalgoreturn) - 1
+                # Calculate better off metric to align with MATLAB
+                if noalgoreturn < 0:
+                    betteroff = abs((taxcumreturn / noalgoreturn) - 1)
                 else:
-                    betteroff = 0  # Both returns are negative or zero
+                    betteroff = (taxcumreturn / noalgoreturn) - 1
 
                 # Calculate losing trades and win rate
                 losingtrades = 0
@@ -246,7 +255,15 @@ def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), incr
                     bestwinrate = win_rate
                     bestlosingtrades = losingtrades  # Keep track of losing trades
 
+                    # Log the new best combination
+                    print(f"New Best - SMA1: {a}, SMA2: {b}, Taxed Return: {taxcumreturn}")
+
                 iterations += 1
+
+                # Report progress
+                if progress_callback:
+                    progress = (iterations / combinations) * 100
+                    progress_callback(progress)
 
         # If no trades were made, continue
         if besttrades is None:

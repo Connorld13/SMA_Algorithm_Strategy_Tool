@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import pandas as pd
+import threading
 from fetchdata import fetch_and_prepare_data
 from algorithm import run_matlab_sma_strategy  # Corrected import
 
@@ -78,68 +79,64 @@ def filter_table(query):
             tree.insert("", "end", values=(row["Symbol"], row["Name"], ""), tags=("row",))
 
 def on_run_now():
-    """Fetch data and execute the strategy."""
-    global log_text  # Ensure log_text is recognized globally
+    """Fetch data and execute the strategy in a separate thread with progress tracking."""
+    def run_algorithm():
+        try:
+            # Reset and start progress bar
+            progress_bar["value"] = 0
 
-    try:
-        mode = mode_var.get()
+            def update_progress(value):
+                """Update the progress bar."""
+                progress_bar["value"] = value
+                root.update_idletasks()  # Force UI update
 
-        # Get date inputs
-        start_date = start_date_entry.get()
-        end_date = end_date_entry.get()
+            mode = mode_var.get()
 
-        # Validate dates
-        datetime.strptime(start_date, "%Y-%m-%d")
-        datetime.strptime(end_date, "%Y-%m-%d")
+            # Get date inputs
+            start_date = start_date_entry.get()
+            end_date = end_date_entry.get()
 
-        # Determine selected stocks based on mode
-        if mode == "Entire S&P 500":
-            selected_stocks = sp500_data['Symbol'].tolist()
-        elif mode == "Half of S&P 500":
-            selected_stocks = sp500_data['Symbol'].tolist()[:len(sp500_data)//2]
-        else:
-            # Validate stock selection
-            selected_stocks = validate_stock_selection()
-            if selected_stocks is None:
-                return
+            # Validate dates
+            datetime.strptime(start_date, "%Y-%m-%d")
+            datetime.strptime(end_date, "%Y-%m-%d")
 
-        # DEBUG: Log stock selection and dates
-        print(f"Selected stocks: {selected_stocks}")
-        print(f"Date range: {start_date} to {end_date}")
+            # Determine selected stocks based on mode
+            if mode == "Entire S&P 500":
+                selected_stocks = sp500_data['Symbol'].tolist()
+            elif mode == "Half of S&P 500":
+                selected_stocks = sp500_data['Symbol'].tolist()[:len(sp500_data)//2]
+            else:
+                # Validate stock selection
+                selected_stocks = validate_stock_selection()
+                if selected_stocks is None:
+                    return
 
-        # Fetch data
-        print("Fetching data...")
-        data = fetch_and_prepare_data(selected_stocks, start_date, end_date)
+            # Fetch data
+            data = fetch_and_prepare_data(selected_stocks, start_date, end_date)
 
-        # DEBUG: Log fetched data
-        print(f"Fetched data:\n{data.head()}")
+            # Run the SMA strategy
+            sma1_range = (5, 200)
+            sma2_range = (5, 200)
+            increment = 5
+            results = run_matlab_sma_strategy(data, sma1_range, sma2_range, increment, progress_callback=update_progress)
 
-        # Run the SMA strategy
-        print("Running SMA strategy...")
-        sma1_range = (5, 200)
-        sma2_range = (5, 200)
-        increment = 5
-        results = run_matlab_sma_strategy(data, sma1_range, sma2_range, increment)
+            # Display results in log text
+            log_text.delete(1.0, tk.END)  # Clear previous logs
+            for ticker, result in results.items():
+                log_text.insert(tk.END, f"Results for {ticker}:\n")
+                for key, value in result.items():
+                    log_text.insert(tk.END, f"  {key}: {value}\n")
+                log_text.insert(tk.END, "\n")
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
+        except Exception as e:
+            messagebox.showerror("Error", f"Unexpected error: {e}")
+        finally:
+            progress_bar["value"] = 100  # Ensure progress bar completes at the end
 
-        # DEBUG: Log strategy results
-        print(f"Strategy results:\n{results}")
-
-        # Display results in log text
-        log_text.delete(1.0, tk.END)  # Clear previous logs
-        for ticker, result in results.items():
-            log_text.insert(tk.END, f"Results for {ticker}:\n")
-            for key, value in result.items():
-                log_text.insert(tk.END, f"  {key}: {value}\n")
-            log_text.insert(tk.END, "\n")
-
-        # Removed CSV export code as per your request
-
-    except ValueError as e:
-        messagebox.showerror("Error", str(e))
-        print(f"ValueError: {e}")
-    except Exception as e:
-        messagebox.showerror("Error", f"Unexpected error: {e}")
-        print(f"Unexpected error: {e}")
+    # Run the algorithm in a separate thread
+    thread = threading.Thread(target=run_algorithm)
+    thread.start()
 
 def create_ui():
     # Default date range: 5 years from yesterday
@@ -149,7 +146,7 @@ def create_ui():
     start_date_str = start_date_default.strftime("%Y-%m-%d")
 
     global root, mode_var, sp500_data, tree, search_entry, tree_frame, search_frame
-    global start_date_entry, end_date_entry, log_text  # Declare log_text as global here
+    global start_date_entry, end_date_entry, log_text, progress_bar  # Declare progress_bar as global
 
     # Load S&P 500 tickers
     sp500_data = fetch_sp500_tickers_from_csv()
@@ -157,7 +154,7 @@ def create_ui():
     # Main Window
     root = tk.Tk()
     root.title("SMA Trading Simulation")
-    root.geometry("900x700")
+    root.geometry("900x750")  # Increased height to accommodate progress bar
 
     # Mode Selection
     mode_var = tk.StringVar(value="Single Stock")
@@ -209,6 +206,10 @@ def create_ui():
     # Log Output
     log_text = tk.Text(root, height=10, width=100)  # Create log_text here
     log_text.grid(row=6, column=0, columnspan=5, padx=10, pady=10)
+
+    # Progress Bar
+    progress_bar = ttk.Progressbar(root, mode="determinate", maximum=100)
+    progress_bar.grid(row=7, column=0, columnspan=5, padx=10, pady=10, sticky="ew")
 
     # Initial UI State
     tree_frame.grid_remove()
