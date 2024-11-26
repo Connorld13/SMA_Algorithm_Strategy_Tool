@@ -1,296 +1,350 @@
 # algorithm.py
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from datetime import datetime
+import time
 
-def run_matlab_sma_strategy(data, sma1_range=(5, 200), sma2_range=(5, 200), increment=5, start_amount=10000.0, progress_callback=None):
+def run_algorithm(data, start_amount=10000, num_rows=1258, progress_callback=None):
     """
-    Run the SMA trading strategy converted from MATLAB code.
+    Runs the SMA trading algorithm on the provided stock data.
 
     Parameters:
-        data (pd.DataFrame): DataFrame containing stock data with columns ['Date', 'Close', 'Ticker'].
-        sma1_range (tuple): Tuple containing the start and end values for SMA1.
-        sma2_range (tuple): Tuple containing the start and end values for SMA2.
-        increment (int): Increment value for SMA ranges.
-        start_amount (float): Initial amount to start trading with.
-        progress_callback (function, optional): Function to report progress.
+        data (pd.DataFrame): DataFrame containing 'Date', 'Close', and 'Ticker' columns.
+        start_amount (float): Initial amount of liquidity.
+        num_rows (int): Number of trading days to process.
+        progress_callback (function): Function to call with progress updates (percentage).
 
     Returns:
-        dict: Results containing the best parameters and performance metrics for each ticker.
+        dict: A dictionary containing output results and best trades.
     """
+    # Ensure 'Close' is the stock price column
+    stockcol = 'Close'  # Adjust if necessary based on your data
+
+    # Convert 'Date' to datetime if not already
+    if not pd.api.types.is_datetime64_any_dtype(data['Date']):
+        data['Date'] = pd.to_datetime(data['Date'])
+
+    # **Temporary Change: Round 'Close' prices to thousandths place**
+    data[stockcol] = data[stockcol].round(3)
+
+    # Sort the data by 'Date' in ascending order
+    stocks = data.sort_values('Date').reset_index(drop=True)
+
+    # Limit to the last `num_rows` trading days
+    if len(stocks) > num_rows:
+        stocks = stocks.tail(num_rows).reset_index(drop=True)
+
+    # Print column names to verify correct mapping
+    print("Column Names:", stocks.columns.tolist())
+
+    # Verify sorting by printing first and last few dates
+    print("\nFirst 5 Dates After Sorting and Limiting:")
+    print(stocks['Date'].head())
+    print("\nLast 5 Dates After Sorting and Limiting:")
+    print(stocks['Date'].tail())
+
+    # Verify parsing by printing first few rows
+    print("\nFirst 5 Rows After Parsing:")
+    print(stocks.head())
+
+    numrows = len(stocks)
+
+    sma1 = np.zeros(numrows)
+    sma2 = np.zeros(numrows)
+
+    # Tax rates
     over1yeartax = 0.78
     under1yeartax = 0.65
-    results = {}
 
-    tickers = data["Ticker"].unique()
-    for ticker in tickers:
-        stock_data = data[data["Ticker"] == ticker].copy()
-        stock_data.sort_values('Date', ascending=True, inplace=True)
-        stock_data.reset_index(drop=True, inplace=True)
+    # Initialize best return variables
+    besttaxedreturn = -np.inf  # Use negative infinity for initial comparison
+    besta = None
+    bestb = None
+    besttradecount = 0
+    besttrades = []
+    bestendtaxed_liquidity = start_amount
 
-        numrows = len(stock_data)
-        if numrows == 0:
-            continue  # Skip if no data for ticker
+    # Parameters for SMA ranges
+    astart, aend, bstart, bend, inc = 5, 200, 5, 200, 5
+    combinations = (((aend - astart) // inc) + 1) * (((bend - bstart) // inc) + 1)
+    iterations = 0
 
-        besttaxedreturn = -np.inf
-        besta = None
-        bestb = None
-        besttradecount = 0
-        besttrades = None
-        bestunder1yearpl = 0
-        bestover1yearpl = 0
-        bestendtaxedliquidity = 0
-        bestmaxdrawdown = None
-        bestwinrate = None
-        bestbetteroff = None
-        bestnoalgoreturn = None
-        test_date = stock_data.iloc[-1]['Date']
+    # Loop through SMA combinations
+    for a in range(astart, aend + 1, inc):
+        # Recompute SMA1 for current 'a'
+        sma1 = stocks[stockcol].rolling(window=a, min_periods=a).mean().fillna(0).values
+        smadiff = sma1 - sma2  # Initial smadiff based on SMA1 and SMA2=0
 
-        astart, aend = sma1_range
-        bstart, bend = sma2_range
-        inc = increment
+        for b in range(bstart, bend + 1, inc):
+            # Recompute SMA2 for current 'b'
+            sma2 = stocks[stockcol].rolling(window=b, min_periods=b).mean().fillna(0).values
+            smadiff = sma1 - sma2  # Recalculate smadiff based on updated SMA2
 
-        combinations = (((aend - astart) // inc) + 1) * (((bend - bstart) // inc) + 1)
-        iterations = 0
+            # Initialize buy/sell signals
+            buysells = np.zeros(numrows)
+            pos = 0  # 0: not in position, 1: in position
 
-        # Outer loop over SMA1
-        for a in range(astart, aend + 1, inc):
-            # Compute SMA1 without shifting
-            stock_data['SMA1'] = stock_data['Close'].rolling(window=a).mean()
+            # Initialize current_liquidity before appending trades
+            current_liquidity = start_amount
 
-            # Inner loop over SMA2
-            for b in range(bstart, bend + 1, inc):
-                # Remove the condition to skip when a == b
-                # if a == b:
-                #     continue  # Skip if SMA1 period is equal to SMA2 period
+            # Set start_index to b - 1
+            start_index = b - 1  # Start at index (b - 1)
 
-                # Compute SMA2 without shifting
-                stock_data['SMA2'] = stock_data['Close'].rolling(window=b).mean()
+            # Signal generation
+            for i in range(start_index, numrows - 1):
+                if i == start_index:
+                    # Handle the first day where SMA1 may not be defined
+                    smadiff_current = smadiff[i]
+                    smadiff_prev = smadiff[i - 1]
 
-                # Skip if not enough data to compute SMAs
-                if stock_data['SMA1'].isna().all() or stock_data['SMA2'].isna().all():
-                    continue
+                    diff_change = smadiff_current - smadiff_prev
 
-                # Calculate SMADiff and its change
-                stock_data['SMADiff'] = stock_data['SMA1'] - stock_data['SMA2']
-                stock_data['SMADiff_Change'] = stock_data['SMADiff'] - stock_data['SMADiff'].shift(1)
-
-                # Generate buy/sell signals
-                stock_data['Position'] = 0
-                pos = 0  # Position flag: 0 = no position, 1 = holding
-                buysells = []
-                # Start from index where both SMAs are valid
-                start_idx = max(a, b)
-                for idx in range(start_idx, numrows):
-                    # Ensure SMADiff and SMADiff_Change are valid
-                    if pd.isna(stock_data.at[idx, 'SMADiff']) or pd.isna(stock_data.at[idx - 1, 'SMADiff']):
-                        continue
-                    smadiff_change = stock_data.at[idx, 'SMADiff_Change']
-                    if smadiff_change > 0 and pos == 0:
-                        # Buy signal
-                        stock_data.at[idx, 'Position'] = 1
-                        buysells.append((idx, 1))
+                    if diff_change > 0 and pos == 0:
+                        buysells[i] = 1  # Buy
                         pos = 1
-                    elif smadiff_change < 0 and pos == 1:
-                        # Sell signal
-                        stock_data.at[idx, 'Position'] = -1
-                        buysells.append((idx, -1))
+                    elif diff_change < 0 and pos == 1:
+                        buysells[i] = -1  # Sell
                         pos = 0
                     else:
-                        stock_data.at[idx, 'Position'] = 0
+                        buysells[i] = 0  # No action
+                else:
+                    # Existing logic for subsequent days
+                    smadiff_current = smadiff[i]
+                    smadiff_prev = smadiff[i - 1]
+                    diff_change = smadiff_current - smadiff_prev
 
-                # Handle open position at the end of data
-                # To match MATLAB, we will **not** close open positions explicitly
-                # Uncomment the following block if you prefer closing positions in Python
-                """
-                if pos == 1:
-                    idx = numrows - 1
-                    stock_data.at[idx, 'Position'] = -1
-                    buysells.append((idx, -1))
-                    pos = 0
-                """
+                    if diff_change > 0 and pos == 0:
+                        buysells[i] = 1  # Buy
+                        pos = 1
+                    elif diff_change < 0 and pos == 1:
+                        buysells[i] = -1  # Sell
+                        pos = 0
+                    else:
+                        buysells[i] = 0  # No action
 
-                # Simulate trades
-                trades = []
-                tradecount = 0
-                for idx, signal in buysells:
+            # Calculate and list trades
+            trades = []  # List to store trades as dictionaries
+            tradecount = 0
+            buy_index = None
+
+            for i in range(start_index, numrows):
+                signal = buysells[i]
+                if signal == 1:
                     tradecount += 1
-                    trade = {
+                    trades.append({
                         'TradeNumber': tradecount,
-                        'Buy/Sell': signal,
-                        'Date': stock_data.at[idx, 'Date'],
-                        'Price': stock_data.at[idx, 'Close'],
-                    }
-                    trades.append(trade)
+                        'Buy/Sell': 1,
+                        'DateNum': stocks.at[i, 'Date'].toordinal(),
+                        'Price': stocks.at[i, stockcol],
+                        'PreTaxReturn': 0.0,  # Will be updated on sell
+                        'PreTaxCumReturn': 0.0,  # Will be updated
+                        'HoldTime': 0.0,  # Will be updated on sell
+                        'Date': stocks.at[i, 'Date'],
+                        'PreTaxLiquidity': start_amount if tradecount == 1 else current_liquidity,
+                        'PreTax Running P/L': 0.0  # Will be updated
+                    })
+                    buy_index = i
+                elif signal == -1 and buy_index is not None:
+                    tradecount += 1
+                    sell_price = stocks.at[i, stockcol]
+                    buy_price = stocks.at[buy_index, stockcol]
+                    pre_tax_return = (sell_price - buy_price) / buy_price
+                    hold_time = (stocks.at[i, 'Date'] - stocks.at[buy_index, 'Date']).days
 
-                if tradecount < 2:
-                    continue  # Need at least one buy and one sell
+                    trades.append({
+                        'TradeNumber': tradecount,
+                        'Buy/Sell': -1,
+                        'DateNum': stocks.at[i, 'Date'].toordinal(),
+                        'Price': sell_price,
+                        'PreTaxReturn': pre_tax_return,
+                        'PreTaxCumReturn': 0.0,  # Will be updated
+                        'HoldTime': hold_time,
+                        'Date': stocks.at[i, 'Date'],
+                        'PreTaxLiquidity': current_liquidity + (current_liquidity * pre_tax_return),
+                        'PreTax Running P/L': current_liquidity * pre_tax_return  # Will be updated
+                    })
+                    # Update current_liquidity after sell
+                    current_liquidity += current_liquidity * pre_tax_return
+                    buy_index = None  # Reset after selling
 
-                # Initialize trades_df with correct data types
-                trades_df = pd.DataFrame(trades).astype({
-                    'TradeNumber': 'int64',
-                    'Buy/Sell': 'int64',
-                    'Date': 'datetime64[ns]',
-                    'Price': 'float64'
-                })
+            # Handle open position at the end by selling at the last price if not already sold
+            if pos == 1 and buy_index is not None:
+                if buysells[numrows - 1] != -1:
+                    tradecount += 1
+                    sell_price = stocks.at[numrows - 1, stockcol]
+                    buy_price = stocks.at[buy_index, stockcol]
+                    pre_tax_return = (sell_price - buy_price) / buy_price
+                    hold_time = (stocks.at[numrows - 1, 'Date'] - stocks.at[buy_index, 'Date']).days
 
-                # Initialize other columns
-                trades_df['Return'] = 0.0
-                trades_df['HoldTime'] = 0
-                trades_df['CumulativeReturn'] = 0.0
-                trades_df['Liquidity'] = np.nan
-                trades_df['P/L'] = 0.0
+                    trades.append({
+                        'TradeNumber': tradecount,
+                        'Buy/Sell': -1,
+                        'DateNum': stocks.at[numrows - 1, 'Date'].toordinal(),
+                        'Price': sell_price,
+                        'PreTaxReturn': pre_tax_return,
+                        'PreTaxCumReturn': 0.0,  # Will be updated later
+                        'HoldTime': hold_time,
+                        'Date': stocks.at[numrows - 1, 'Date'],
+                        'PreTaxLiquidity': current_liquidity + (current_liquidity * pre_tax_return),
+                        'PreTax Running P/L': current_liquidity * pre_tax_return  # Will be updated later
+                    })
+                    # Update current_liquidity after final sell
+                    current_liquidity += current_liquidity * pre_tax_return
 
-                # Set starting amount
-                trades_df.at[0, 'Liquidity'] = float(start_amount)
+            # Convert trades list to DataFrame
+            trades_df = pd.DataFrame(trades)
 
-                # Calculate returns and hold times
-                for i in range(1, len(trades_df), 2):
-                    if i >= len(trades_df):
-                        break  # Prevent out-of-bounds
-                    buy_trade = trades_df.iloc[i - 1]
-                    sell_trade = trades_df.iloc[i]
-                    buy_price = buy_trade['Price']
-                    sell_price = sell_trade['Price']
-                    trades_df.at[i, 'Return'] = (sell_price - buy_price) / buy_price
-                    buy_date = buy_trade['Date']
-                    sell_date = sell_trade['Date']
-                    hold_time = (sell_date - buy_date).days
-                    trades_df.at[i, 'HoldTime'] = hold_time  # already integer
+            # Initialize cumulative variables
+            pre_tax_pnl = 0.0
+            pre_tax_cum_return = 0.0
 
-                    # Update cumulative return and liquidity
-                    if i == 1:
-                        trades_df.at[i, 'Liquidity'] = float(start_amount) * (1 + trades_df.at[i, 'Return'])
+            # Update trades with cumulative returns and P/L
+            for idx_trade, trade in trades_df.iterrows():
+                if trade['Buy/Sell'] == 1:
+                    # Buy Trade
+                    if trade['TradeNumber'] == 1:
+                        trades_df.at[idx_trade, 'PreTaxLiquidity'] = start_amount
                     else:
-                        prev_liquidity = trades_df.at[i - 2, 'Liquidity']
-                        trades_df.at[i, 'Liquidity'] = prev_liquidity * (1 + trades_df.at[i, 'Return'])
+                        trades_df.at[idx_trade, 'PreTaxLiquidity'] = current_liquidity
+                    trades_df.at[idx_trade, 'PreTax Running P/L'] = pre_tax_pnl
+                elif trade['Buy/Sell'] == -1:
+                    # Sell Trade
+                    pre_tax_return = trade['PreTaxReturn']
+                    pre_tax_pnl += current_liquidity * pre_tax_return
+                    pre_tax_cum_return = (pre_tax_cum_return + 1) * (pre_tax_return + 1) - 1
+                    trades_df.at[idx_trade, 'PreTaxCumReturn'] = pre_tax_cum_return
+                    trades_df.at[idx_trade, 'PreTax Running P/L'] = pre_tax_pnl
 
-                    trades_df.at[i, 'CumulativeReturn'] = (trades_df.at[i, 'Liquidity'] / float(start_amount)) - 1
+            # Assign the processed trades back to the list
+            if not trades_df.empty:
+                trades = trades_df.to_dict('records')
+            else:
+                trades = []
 
-                    # Ensure liquidity doesn't become negative
-                    if trades_df.at[i, 'Liquidity'] <= 0:
-                        print(f"Liquidity dropped to zero or negative at trade {i}.")
-                        break
+            # Compute under1yearpl and over1yearpl
+            under1yearpl = 0.0
+            over1yearpl = 0.0
+            pre_tax_liquidity = start_amount
 
-                # If no trades were executed properly, skip
-                if len(trades_df) < 2:
-                    continue
+            for trade in trades:
+                if trade['Buy/Sell'] == -1:
+                    pre_tax_return = trade['PreTaxReturn']
+                    hold_time = trade['HoldTime']
+                    profit_dollars = pre_tax_return * pre_tax_liquidity
 
-                # Calculate profit/loss for under and over 1-year holds
-                under1yearpl = 0.0
-                over1yearpl = 0.0
-                for i in range(1, len(trades_df), 2):
-                    if i >= len(trades_df):
-                        break
-                    pl = trades_df.at[i, 'Liquidity'] - (trades_df.at[i - 2, 'Liquidity'] if i >= 2 else float(start_amount))
-                    hold_time = trades_df.at[i, 'HoldTime']
                     if hold_time < 365:
-                        under1yearpl += pl
+                        under1yearpl += profit_dollars
                     else:
-                        over1yearpl += pl
+                        over1yearpl += profit_dollars
 
-                # Calculate taxed cumulative return
-                total_pl = under1yearpl + over1yearpl
-                if total_pl > 0:
-                    under1yearpl_calc = under1yearpl * under1yeartax if under1yearpl > 0 else under1yearpl
-                    over1yearpl_calc = over1yearpl * over1yeartax if over1yearpl > 0 else over1yearpl
-                    taxcumpl = under1yearpl_calc + over1yearpl_calc
+                    pre_tax_liquidity += profit_dollars  # Update liquidity after trade
+
+            # Calculate taxed return
+            if tradecount > 1 and (under1yearpl + over1yearpl) > 0:
+                if under1yearpl > 0:
+                    taxed_under1yearpl = under1yearpl * under1yeartax
                 else:
-                    taxcumpl = total_pl  # No tax if total profit is negative
-
-                endtaxedliquidity = float(start_amount) + taxcumpl
-                taxcumreturn = (endtaxedliquidity / float(start_amount)) - 1
-
-                # Debugging: Print taxcumreturn for a specific combination
-                if a == 175 and b == 135:
-                    print(f"Debug - a: {a}, b: {b}, Taxed Return: {taxcumreturn}")
-
-                # Calculate buy-and-hold return without algorithm
-                first_price = stock_data.iloc[0]['Close']
-                last_price = stock_data.iloc[-1]['Close']
-                hold_duration = (stock_data.iloc[-1]['Date'] - stock_data.iloc[0]['Date']).days
-                raw_return = (last_price - first_price) / first_price
-
-                if hold_duration < 365 and raw_return > 0:
-                    noalgoreturn = raw_return * under1yeartax
-                elif hold_duration >= 365 and raw_return > 0:
-                    noalgoreturn = raw_return * over1yeartax
+                    taxed_under1yearpl = under1yearpl  # No tax on losses
+                if over1yearpl > 0:
+                    taxed_over1yearpl = over1yearpl * over1yeartax
                 else:
-                    noalgoreturn = raw_return  # No tax if return is negative
+                    taxed_over1yearpl = over1yearpl  # No tax on losses
+                taxcumpl = taxed_under1yearpl + taxed_over1yearpl
+            else:
+                taxcumpl = under1yearpl + over1yearpl
 
-                # Calculate better off metric to align with MATLAB
-                if noalgoreturn < 0:
-                    betteroff = abs((taxcumreturn / noalgoreturn) - 1)
-                else:
-                    betteroff = (taxcumreturn / noalgoreturn) - 1
+            # Compute cumulative taxed liquidity and taxcumreturn
+            endtaxed_liquidity = start_amount + taxcumpl
+            taxcumreturn = (endtaxed_liquidity / start_amount) - 1
 
-                # Calculate losing trades and win rate
-                losingtrades = 0
-                total_closed_trades = tradecount // 2
-                for i in range(1, len(trades_df), 2):
-                    if trades_df.at[i, 'Return'] < 0:
-                        losingtrades += 1
-                win_rate = ((total_closed_trades - losingtrades) / total_closed_trades) if total_closed_trades > 0 else 0
+            # Update best return stats if current is better
+            if taxcumreturn > besttaxedreturn:
+                besttaxedreturn = taxcumreturn
+                besta = a
+                bestb = b
+                besttradecount = tradecount
+                besttrades = trades.copy()
+                bestunder1yearpl = under1yearpl
+                bestover1yearpl = over1yearpl
+                bestendtaxed_liquidity = endtaxed_liquidity
 
-                # Calculate max drawdown (maximum peak-to-trough decline)
-                cumulative_liquidity = trades_df.loc[trades_df['Liquidity'].notnull(), 'Liquidity']
-                peak = cumulative_liquidity.cummax()
-                drawdown = (cumulative_liquidity - peak) / peak
-                max_drawdown = drawdown.min()
+                # Calculate number of losing trades
+                losingtrades = sum(1 for trade in besttrades if trade.get('PreTaxReturn', 0) < 0)
+                losingtradepct = (losingtrades * 2) / besttradecount if besttradecount else 0  # Multiply by 2 to match MATLAB's logic
 
-                # Update best stats if current taxed return is better
-                if taxcumreturn > besttaxedreturn:
-                    besttaxedreturn = taxcumreturn
-                    besta = a
-                    bestb = b
-                    besttradecount = tradecount
-                    besttrades = trades_df.copy()
-                    bestunder1yearpl = under1yearpl
-                    bestover1yearpl = over1yearpl
-                    bestendtaxedliquidity = endtaxedliquidity
-                    bestbetteroff = betteroff
-                    bestnoalgoreturn = noalgoreturn
-                    bestmaxdrawdown = max_drawdown
-                    bestwinrate = win_rate
-                    bestlosingtrades = losingtrades  # Keep track of losing trades
+            iterations += 1
 
-                    # Log the new best combination
-                    print(f"New Best - SMA1: {a}, SMA2: {b}, Taxed Return: {taxcumreturn}")
+            # **Call progress callback with percentage progress**
+            if progress_callback:
+                progress_percentage = (iterations / combinations) * 100
+                progress_percentage = min(progress_percentage, 100)  # Ensure it does not exceed 100
+                progress_callback(progress_percentage)
 
-                iterations += 1
+    # After all iterations, calculate overall stats
+    total_days = (stocks.at[numrows - 1, 'Date'] - stocks.at[0, 'Date']).days
+    price_return = (stocks.at[numrows - 1, stockcol] - stocks.at[0, stockcol]) / stocks.at[0, stockcol]
 
-                # Report progress
-                if progress_callback:
-                    progress = (iterations / combinations) * 100
-                    progress_callback(progress)
+    # Calculate noalgoreturn based on holding period
+    if total_days < 365:
+        if price_return > 0:
+            noalgoreturn = price_return * under1yeartax
+        else:
+            noalgoreturn = price_return
+    else:
+        if price_return > 0:
+            noalgoreturn = price_return * over1yeartax
+        else:
+            noalgoreturn = price_return
 
-        # If no trades were made, continue
-        if besttrades is None:
-            continue
+    # Calculate betteroff
+    if noalgoreturn != 0:
+        betteroff = (besttaxedreturn / noalgoreturn) - 1
+    else:
+        betteroff = 0
 
-        # Calculate losing trade percentage
-        losingtradepct = (bestlosingtrades * 2) / besttradecount if besttradecount > 0 else 0
+    # Calculate average trade percentage: considering only sell trades
+    sell_trades_final = [trade for trade in besttrades if trade['Buy/Sell'] == -1]
+    avgtradepct = besttaxedreturn / len(sell_trades_final) if sell_trades_final else 0
 
-        # Calculate average trade percentage (avgtradepct)
-        avgtradepct = besttaxedreturn / (besttradecount / 2) if besttradecount > 0 else 0
+    # Max drawdown: worst trade return percentage
+    maxdrawdown = min(trade['PreTaxReturn'] for trade in sell_trades_final) if sell_trades_final else 0
 
-        # Store results
-        results[ticker] = {
-            'Ticker': ticker,
-            'Test Date': test_date.strftime('%Y-%m-%d'),
-            'Best SMA1': besta,
-            'Best SMA2': bestb,
-            '5 Year Diff %': bestbetteroff * 100,
-            'Taxed Return %': besttaxedreturn * 100,
-            'No Algo Return %': bestnoalgoreturn * 100,
-            'Win Rate %': bestwinrate * 100,
-            'Max Drawdown %': bestmaxdrawdown * 100,
-            'Number of Closed Trades': besttradecount,
-            'Average Trade %': avgtradepct * 100,
-            'Losing Trade %': losingtradepct * 100,
-            'Iterations': iterations,
-            'Combinations': combinations,
-        }
+    # Prepare output results
+    outputresults1 = {
+        "betteroff": betteroff,
+        "besttaxedreturn": besttaxedreturn,
+        "noalgoreturn": noalgoreturn,
+        "besta": besta,
+        "bestb": bestb,
+        "besttradecount": besttradecount,
+        "avgtradepct": avgtradepct,
+        "iterations": iterations,
+        "combinations": combinations
+    }
 
-    return results
+    outputresults2 = {
+        "startamount": start_amount,
+        "bestendtaxed_liquidity": bestendtaxed_liquidity,
+        "(noalgoreturn+1)*startamount": (noalgoreturn +1)*start_amount,
+        "losingtrades": losingtrades,
+        "losingtradepct": losingtradepct,
+        "maxdrawdown(worst trade return pct)": maxdrawdown
+    }
+
+    # Convert besttrades to DataFrame for better visualization
+    if besttrades:
+        besttrades_df = pd.DataFrame(besttrades)
+        # Assign column order
+        besttrades_df = besttrades_df[['TradeNumber','Buy/Sell','DateNum','Price','PreTaxReturn','PreTaxCumReturn','HoldTime','Date','PreTaxLiquidity','PreTax Running P/L']]
+    else:
+        besttrades_df = pd.DataFrame()
+
+    # Prepare the final result dictionary
+    result = {
+        "outputresults1": outputresults1,
+        "outputresults2": outputresults2,
+        "besttrades": besttrades_df.to_dict('records') if not besttrades_df.empty else []
+    }
+
+    return result

@@ -6,14 +6,20 @@ import time
 # Load and clean the data
 data = pd.read_csv('data.csv')
 
-# Flip the data to match MATLAB's flip function and reset the index
-stocks = data.iloc[::-1].reset_index(drop=True)
+# Convert 'Date' to datetime
+data['Date'] = pd.to_datetime(data['Date'])
+
+# Sort the data by 'Date' in ascending order
+stocks = data.sort_values('Date').reset_index(drop=True)
 
 # Print column names to verify correct mapping
 print("Column Names:", stocks.columns.tolist())
 
-# Convert 'Date' to datetime
-stocks['Date'] = pd.to_datetime(stocks['Date'])
+# Verify sorting by printing first and last few dates
+print("\nFirst 5 Dates After Sorting:")
+print(stocks['Date'].head())
+print("\nLast 5 Dates After Sorting:")
+print(stocks['Date'].tail())
 
 # Select and clean the stock price column
 stockcol = 'Close/Last'  # Ensure this matches your data
@@ -38,9 +44,9 @@ print(stocks.head())
 numrows = len(stocks)
 startamount = 10000
 
-# Initialize SMA1 and SMA2 arrays
-sma1 = np.zeros(numrows)
-sma2 = np.zeros(numrows)
+sma1=np.zeros(numrows)
+sma2=np.zeros(numrows)
+
 
 # Tax rates
 over1yeartax = 0.78
@@ -55,20 +61,22 @@ besttrades = []
 bestendtaxed_liquidity = startamount
 
 # Parameters for SMA ranges (set to 130 and 70)
-astart, aend, bstart, bend, inc = 130, 130, 70, 70, 5
+astart, aend, bstart, bend, inc = 5, 200, 5, 200, 5
 combinations = (((aend - astart) // inc) + 1) * (((bend - bstart) // inc) + 1)
 iterations = 0
 
-# Main optimization loop (only one iteration with a=130 and b=70)
+# Since a and b are fixed (130 and 70), we proceed directly
 for a in range(astart, aend + 1, inc):
     start_time_a = time.time()  # Start timing for 'a' loop (optional)
 
-    # Compute SMA1 for current 'a'
-    sma1 = stocks[stockcol].rolling(window=a, min_periods=a).mean().values
+    # Recompute SMA1 for current 'a'
+    sma1 = stocks[stockcol].rolling(window=a, min_periods=a).mean().fillna(0).values
+    smadiff = sma1 - sma2  # Recalculate smadiff based on updated sma1
 
     for b in range(bstart, bend + 1, inc):
-        # Compute SMA2 for current 'b'
-        sma2 = stocks[stockcol].rolling(window=b, min_periods=b).mean().values
+        # Recompute SMA2 for current 'b'
+        sma2 = stocks[stockcol].rolling(window=b, min_periods=b).mean().fillna(0).values
+        smadiff = sma1 - sma2  # Recalculate smadiff based on updated sma2
 
         # Initialize buy/sell signals
         buysells = np.zeros(numrows)
@@ -77,28 +85,52 @@ for a in range(astart, aend + 1, inc):
         # Initialize current_liquidity before appending trades
         current_liquidity = startamount  # Initialize here to avoid NameError
 
-        # Start index is b-1 to match MATLAB's 1-based indexing
-        start_index = b-1
+        # **Change 1:** Set start_index to b - 1 (69) instead of max(a, b) - 1 (129)
+        start_index = b - 1  # Start at index 69 for day 70
 
-        # Generate buy/sell signals starting from the b-th index
-        # Exclude the last day to prevent buy on the last day
-        for i in range(start_index, numrows-1):
-            # Only consider if both SMAs are valid
-            if np.isnan(sma1[i]) or np.isnan(sma2[i]) or np.isnan(sma1[i - 1]) or np.isnan(sma2[i - 1]):
-                continue  # Skip if any SMA value is NaN
 
-            smadiff_current = sma1[i] - sma2[i]
-            smadiff_prev = sma1[i - 1] - sma2[i - 1]
-            diff_change = smadiff_current - smadiff_prev
+        # **Change 2:** Adjust signal generation to start at start_index (69)
+        for i in range(start_index, numrows - 1):
+            if i == start_index:
+                # Handle the first day where SMA1 may not be defined (but it's set to 0)
+                smadiff_current = smadiff[i]
+                smadiff_prev = smadiff[i - 1]
 
-            if diff_change > 0 and pos == 0:
-                buysells[i] = 1  # Buy
-                pos = 1
-            elif diff_change < 0 and pos == 1:
-                buysells[i] = -1  # Sell
-                pos = 0
+                diff_change = smadiff_current - smadiff_prev
+
+                if diff_change > 0 and pos == 0:
+                    buysells[i] = 1  # Buy
+                    pos = 1
+                    #print(f"Buy signal generated on day {i + 1}")
+                elif diff_change < 0 and pos == 1:
+                    buysells[i] = -1  # Sell
+                    pos = 0
+                    #print(f"Sell signal generated on day {i + 1}")
+                else:
+                    buysells[i] = 0  # No action
+                    #print(f"No action on day {i + 1}")
             else:
-                buysells[i] = 0  # No action
+                # Existing logic for subsequent days
+                # Since SMA1 and SMA2 are already filled with 0 where not defined,
+                # no need to check for NaNs
+                smadiff_current = smadiff[i]
+                smadiff_prev = smadiff[i - 1]
+                diff_change = smadiff_current - smadiff_prev
+
+                if diff_change > 0 and pos == 0:
+                    buysells[i] = 1  # Buy
+                    pos = 1
+                    #print(f"Buy signal generated on day {i + 1}: diff_change = {diff_change:.6f}")
+                elif diff_change < 0 and pos == 1:
+                    buysells[i] = -1  # Sell
+                    pos = 0
+                    #print(f"Sell signal generated on day {i + 1}: diff_change = {diff_change:.6f}")
+                else:
+                    buysells[i] = 0  # No action
+
+        # After the signal generation loop, verify buysells at day 130
+        #if a == 130 and b == 70 and numrows > 129:
+            #print(f"\nBuysells array at day 130 (index 129): {buysells[129]}")
 
         # Calculate and list trades
         trades = []  # List to store trades as dictionaries
@@ -122,6 +154,8 @@ for a in range(astart, aend + 1, inc):
                     'PreTax Running P/L': 0.0  # Will be updated
                 })
                 buy_index = i
+                #if a == 130 and b == 70:
+                    #print(f"Recorded Buy Trade on day {i + 1}")
             elif signal == -1 and buy_index is not None:
                 tradecount += 1
                 sell_price = stocks.at[i, stockcol]
@@ -144,6 +178,8 @@ for a in range(astart, aend + 1, inc):
                 # Update current_liquidity after sell
                 current_liquidity += current_liquidity * pre_tax_return
                 buy_index = None  # Reset after selling
+                #if a == 130 and b == 70:
+                    #print(f"Recorded Sell Trade on day {i + 1}")
 
         # Handle open position at the end by selling at the last price if not already sold
         if pos == 1 and buy_index is not None:
@@ -169,24 +205,26 @@ for a in range(astart, aend + 1, inc):
                 })
                 # Update current_liquidity after final sell
                 current_liquidity += current_liquidity * pre_tax_return
+                #if a == 130 and b == 70:
+                    #print(f"Recorded Final Sell Trade on day {numrows}")
 
         # Convert trades list to DataFrame
         trades_df = pd.DataFrame(trades)
 
         # Identification and verification of DateNum
-        if not trades_df.empty:
-            mismatches = trades_df.apply(
-                lambda row: row['DateNum'] == row['Date'].toordinal(),
-                axis=1
-            )
-            if not mismatches.all():
-                mismatched_trades = trades_df[~mismatches]
-                print("\nDateNum Mismatches Detected:")
-                print(mismatched_trades)
-            else:
-                print("\nAll DateNum values correctly match their respective Dates.")
-        else:
-            print("\nNo trades generated for this combination.")
+        #if not trades_df.empty:
+            #mismatches = trades_df.apply(
+                #lambda row: row['DateNum'] == row['Date'].toordinal(),
+                #axis=1
+            
+            #if not mismatches.all():
+                #mismatched_trades = trades_df[~mismatches]
+                #print("\nDateNum Mismatches Detected:")
+                #print(mismatched_trades)
+            #else:
+                #print("\nAll DateNum values correctly match their respective Dates.")
+        #else:
+            #print("\nNo trades generated for this combination.")
 
         # Initialize cumulative variables
         pre_tax_pnl = 0.0
@@ -258,6 +296,8 @@ for a in range(astart, aend + 1, inc):
             bestb = b
             besttradecount = tradecount
             besttrades = trades.copy()
+            bestunder1yearpl = under1yearpl
+            bestover1yearpl = over1yearpl
             bestendtaxed_liquidity = endtaxed_liquidity
 
             # Calculate number of losing trades
@@ -341,15 +381,15 @@ for a in range(astart, aend + 1, inc):
     pd.set_option('display.max_rows', None)
     pd.set_option('display.float_format', lambda x: '%.12f' % x)
 
-    # Convert besttrades to DataFrame for better visualization
-    if besttrades:
-        besttrades_df = pd.DataFrame(besttrades)
+# Convert besttrades to DataFrame for better visualization
+if besttrades:
+    besttrades_df = pd.DataFrame(besttrades)
 
-        # Assign column order
-        besttrades_df = besttrades_df[['TradeNumber','Buy/Sell','DateNum','Price','PreTaxReturn','PreTaxCumReturn','HoldTime','Date','PreTaxLiquidity','PreTax Running P/L']]
+    # Assign column order
+    besttrades_df = besttrades_df[['TradeNumber','Buy/Sell','DateNum','Price','PreTaxReturn','PreTaxCumReturn','HoldTime','Date','PreTaxLiquidity','PreTax Running P/L']]
 
-        # Print the entire Best Trades DataFrame
-        print("\nBest Trades:")
-        print(besttrades_df)
-    else:
-        print("\nNo trades were generated.")
+    # Print the entire Best Trades DataFrame
+    print("\nBest Trades:")
+    print(besttrades_df)
+else:
+    print("\nNo trades were generated.")

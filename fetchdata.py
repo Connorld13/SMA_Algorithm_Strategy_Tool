@@ -2,6 +2,7 @@
 
 import yfinance as yf
 import pandas as pd
+from datetime import timedelta, datetime
 
 def fetch_and_prepare_data(tickers, start_date, end_date):
     """
@@ -18,12 +19,16 @@ def fetch_and_prepare_data(tickers, start_date, end_date):
     try:
         print(f"Fetching data for tickers: {tickers}")
 
+        # Convert end_date to datetime and add one day for inclusivity
+        end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        end_date_inclusive = (end_date_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+
         # Fetch data in batches to handle large number of tickers
         data_list = []
         batch_size = 100  # Adjust batch size as needed
         for i in range(0, len(tickers), batch_size):
             batch_tickers = tickers[i:i + batch_size]
-            batch_data = yf.download(batch_tickers, start=start_date, end=end_date, group_by="ticker", progress=False, threads=True)
+            batch_data = yf.download(batch_tickers, start=start_date, end=end_date_inclusive, group_by="ticker", progress=False, threads=True)
             if batch_data.empty:
                 continue
             if len(batch_tickers) == 1:
@@ -48,6 +53,9 @@ def fetch_and_prepare_data(tickers, start_date, end_date):
         # Convert 'Date' column to datetime if it's not already
         if not pd.api.types.is_datetime64_any_dtype(data['Date']):
             data['Date'] = pd.to_datetime(data['Date'])
+
+        # **Temporary Change: Round 'Close' prices to thousandths place**
+        data['Close'] = data['Close'].round(3)
 
         return data[['Date', 'Close', 'Ticker']]
     except Exception as e:
