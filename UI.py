@@ -31,7 +31,7 @@ def on_mode_change():
     mode = mode_var.get()
     search_entry.delete(0, tk.END)
     filter_table("")
-    
+
     # **Always show the stock selection table**
     tree_frame.grid()
     search_frame.grid()
@@ -151,8 +151,24 @@ def on_run_now():
                 set_status("Ready")
                 return
 
-            # Calculate start date as 5 years before end date
-            start_date_dt = end_date_dt - relativedelta(years=5)
+            # Get selected time frame
+            time_frame = time_frame_var.get()
+
+            # Calculate start date based on selected time frame and set num_rows
+            if time_frame == "5 Years":
+                start_date_dt = end_date_dt - relativedelta(years=5)
+                num_rows = 1258
+            elif time_frame == "1 Year":
+                start_date_dt = end_date_dt - relativedelta(years=1)
+                num_rows = 252
+            elif time_frame == "6 Months":
+                start_date_dt = end_date_dt - relativedelta(months=6)
+                num_rows = 128
+            else:
+                # Default to 5 years if not recognized
+                start_date_dt = end_date_dt - relativedelta(years=5)
+                num_rows = 1258
+
             start_date = start_date_dt.strftime("%Y-%m-%d")
 
             # Determine selected stocks based on mode
@@ -174,7 +190,7 @@ def on_run_now():
             # Fetch data
             set_status("Fetching data...")
             # Data fetching is considered as 20% of the progress
-            data = fetch_and_prepare_data(selected_stocks, start_date, end_date)
+            data = fetch_and_prepare_data(selected_stocks, start_date, end_date, num_rows)
             update_progress(20)
 
             # Run algorithm
@@ -333,7 +349,7 @@ def export_results_to_csv():
     export_data = []
     today_str = datetime.now().strftime("%Y-%m-%d")
     strategy = "sma2024"
-    total_timeframe = "5 years"
+    total_timeframe = time_frame_var.get()  # Use selected time frame
 
     for symbol, result in algorithm_results.items():
         if "Error" in result:
@@ -346,13 +362,14 @@ def export_results_to_csv():
         # Extract required fields with default values if keys are missing
         besta = output1.get("besta", "")
         bestb = output1.get("bestb", "")
-        betteroff = output1.get("betteroff", 0) * 100  # Convert to percentage
-        besttaxedreturn = output1.get("besttaxedreturn", 0) * 100  # Convert to percentage
-        noalgoreturn = output1.get("noalgoreturn", 0) * 100  # Convert to percentage
-        losingtradepct = output2.get("losingtradepct", 0)
-        win_rate = (losingtradepct - 1) * 100  # As per user instruction
-        maxdrawdown = output2.get("maxdrawdown(worst trade return pct)", 0) * 100  # **Multiply by 100**
+        betteroff = output1.get("betteroff", 0)  # No multiplication by 100
+        besttaxedreturn = output1.get("besttaxedreturn", 0)  # No multiplication by 100
+        noalgoreturn = output1.get("noalgoreturn", 0)  # No multiplication by 100
+        winningtradepct = output2.get("winningtradepct", 0)  # Win rate as a fraction
+        maxdrawdown = output2.get("maxdrawdown(worst trade return pct)", 0)  # Already a fraction
         besttradecount = output1.get("besttradecount", 0)
+        avg_hold_time = output2.get("average_hold_time", 0)
+        win_pct_last_4 = output2.get("win_percentage_last_4_trades", None)  # Already a fraction
 
         export_row = {
             "Symbol": symbol,
@@ -364,9 +381,11 @@ def export_results_to_csv():
             "5 year diff - %": betteroff,
             "Taxed Return": besttaxedreturn,
             "NoAlgoReturn": noalgoreturn,
-            "Win Rate": win_rate,
-            "Max Drawdown": maxdrawdown,  # **Already multiplied by 100**
-            "# of Closed Trades": besttradecount
+            "Win Rate": winningtradepct,
+            "Max Drawdown": maxdrawdown,
+            "# of Closed Trades": besttradecount,
+            "Avg Hold Time": avg_hold_time,
+            "Win % Last 4 Trades": win_pct_last_4
         }
 
         export_data.append(export_row)
@@ -384,7 +403,9 @@ def export_results_to_csv():
         "NoAlgoReturn",
         "Win Rate",
         "Max Drawdown",
-        "# of Closed Trades"
+        "# of Closed Trades",
+        "Avg Hold Time",
+        "Win % Last 4 Trades"
     ])
 
     if export_df.empty:
@@ -418,7 +439,7 @@ def create_ui():
     start_date_str = start_date_dt.strftime("%Y-%m-%d")  # For reference, not used directly
 
     global root, mode_var, sp500_data, tree, search_entry, tree_frame, search_frame
-    global end_date_entry, log_text, progress_bar, status_label  # Declare progress_bar and status_label as global
+    global end_date_entry, log_text, progress_bar, status_label, time_frame_var  # Declare progress_bar and status_label as global
 
     # Load S&P 500 tickers
     sp500_data = fetch_sp500_tickers_from_csv()
@@ -468,6 +489,13 @@ def create_ui():
     end_date_entry = ttk.Entry(root, width=15)
     end_date_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
     end_date_entry.insert(0, yesterday_str)
+
+    # Time Frame Selection
+    ttk.Label(root, text="Time Frame:", font=("Arial", 12)).grid(row=3, column=2, padx=10, pady=10, sticky="e")
+    time_frame_var = tk.StringVar(value="5 Years")
+    time_frame_options = ["5 Years", "1 Year", "6 Months"]
+    time_frame_combobox = ttk.Combobox(root, textvariable=time_frame_var, values=time_frame_options, state="readonly")
+    time_frame_combobox.grid(row=3, column=3, padx=10, pady=10, sticky="w")
 
     # Buttons
     button_frame = ttk.Frame(root)

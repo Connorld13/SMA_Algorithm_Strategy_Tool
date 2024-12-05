@@ -5,14 +5,13 @@ import pandas as pd
 from datetime import datetime
 import time
 
-def run_algorithm(data, start_amount=10000, num_rows=1258, progress_callback=None):
+def run_algorithm(data, start_amount=10000, progress_callback=None):
     """
     Runs the SMA trading algorithm on the provided stock data.
 
     Parameters:
         data (pd.DataFrame): DataFrame containing 'Date', 'Close', and 'Ticker' columns.
         start_amount (float): Initial amount of liquidity.
-        num_rows (int): Number of trading days to process.
         progress_callback (function): Function to call with progress updates (percentage).
 
     Returns:
@@ -30,10 +29,6 @@ def run_algorithm(data, start_amount=10000, num_rows=1258, progress_callback=Non
 
     # Sort the data by 'Date' in ascending order
     stocks = data.sort_values('Date').reset_index(drop=True)
-
-    # Limit to the last `num_rows` trading days
-    if len(stocks) > num_rows:
-        stocks = stocks.tail(num_rows).reset_index(drop=True)
 
     # Print column names to verify correct mapping
     print("Column Names:", stocks.columns.tolist())
@@ -270,8 +265,23 @@ def run_algorithm(data, start_amount=10000, num_rows=1258, progress_callback=Non
                 bestendtaxed_liquidity = endtaxed_liquidity
 
                 # Calculate number of losing trades
-                losingtrades = sum(1 for trade in besttrades if trade.get('PreTaxReturn', 0) < 0)
-                losingtradepct = (losingtrades * 2) / besttradecount if besttradecount else 0  # Multiply by 2 to match MATLAB's logic
+                sell_trades = [trade for trade in besttrades if trade['Buy/Sell'] == -1]
+                total_sell_trades = len(sell_trades)
+                losingtrades = sum(1 for trade in sell_trades if trade.get('PreTaxReturn', 0) < 0)
+                winningtrades = total_sell_trades - losingtrades
+
+                # Calculate percentages
+                losingtradepct = losingtrades / total_sell_trades if total_sell_trades else 0
+                winningtradepct = winningtrades / total_sell_trades if total_sell_trades else 0
+
+                # Calculate average hold time
+                hold_times = [trade['HoldTime'] for trade in sell_trades]
+                average_hold_time = sum(hold_times) / len(hold_times) if hold_times else 0
+
+                # Calculate win percentage of last 4 trades
+                last_4_trades = sell_trades[-4:]
+                wins_last_4 = sum(1 for trade in last_4_trades if trade['PreTaxReturn'] > 0)
+                win_percentage_last_4_trades = wins_last_4 / 4 if len(last_4_trades) == 4 else None  # None if less than 4 trades
 
             iterations += 1
 
@@ -297,11 +307,12 @@ def run_algorithm(data, start_amount=10000, num_rows=1258, progress_callback=Non
         else:
             noalgoreturn = price_return
 
-    # Calculate betteroff
+    # Calculate betteroff using the new formula
     if noalgoreturn != 0:
-        betteroff = (besttaxedreturn / noalgoreturn) - 1
+        betteroff = (besttaxedreturn - noalgoreturn) / abs(noalgoreturn)
     else:
-        betteroff = 0
+        # Handle the case where noalgoreturn is zero
+        betteroff = np.inf if besttaxedreturn > 0 else -np.inf if besttaxedreturn < 0 else 0
 
     # Calculate average trade percentage: considering only sell trades
     sell_trades_final = [trade for trade in besttrades if trade['Buy/Sell'] == -1]
@@ -329,7 +340,10 @@ def run_algorithm(data, start_amount=10000, num_rows=1258, progress_callback=Non
         "(noalgoreturn+1)*startamount": (noalgoreturn +1)*start_amount,
         "losingtrades": losingtrades,
         "losingtradepct": losingtradepct,
-        "maxdrawdown(worst trade return pct)": maxdrawdown
+        "winningtradepct": winningtradepct,
+        "maxdrawdown(worst trade return pct)": maxdrawdown,
+        "average_hold_time": average_hold_time,
+        "win_percentage_last_4_trades": win_percentage_last_4_trades
     }
 
     # Convert besttrades to DataFrame for better visualization

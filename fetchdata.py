@@ -4,7 +4,7 @@ import yfinance as yf
 import pandas as pd
 from datetime import timedelta, datetime
 
-def fetch_and_prepare_data(tickers, start_date, end_date):
+def fetch_and_prepare_data(tickers, start_date, end_date, num_rows):
     """
     Fetch and prepare stock data for the given tickers and date range.
 
@@ -12,6 +12,7 @@ def fetch_and_prepare_data(tickers, start_date, end_date):
         tickers (list): List of stock tickers.
         start_date (str): Start date in YYYY-MM-DD format.
         end_date (str): End date in YYYY-MM-DD format.
+        num_rows (int): Number of rows to limit per ticker.
 
     Returns:
         pd.DataFrame: A DataFrame with historical stock data.
@@ -56,6 +57,15 @@ def fetch_and_prepare_data(tickers, start_date, end_date):
 
         # **Temporary Change: Round 'Close' prices to thousandths place**
         data['Close'] = data['Close'].round(3)
+
+        # Limit data to num_rows per ticker
+        limited_data = []
+        for ticker in tickers:
+            ticker_data = data[data['Ticker'] == ticker].copy()
+            ticker_data = ticker_data.sort_values('Date').tail(num_rows)
+            limited_data.append(ticker_data)
+
+        data = pd.concat(limited_data, ignore_index=True)
 
         return data[['Date', 'Close', 'Ticker']]
     except Exception as e:
