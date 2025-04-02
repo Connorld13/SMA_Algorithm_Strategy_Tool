@@ -10,6 +10,9 @@ import threading
 from fetchdata import fetch_and_prepare_data
 import algorithm
 
+# ---- NEW IMPORT ----
+import visual  # <-- (1) Import the new visual.py
+
 # Global variable to store algorithm results
 algorithm_results = {}
 
@@ -17,6 +20,9 @@ algorithm_results = {}
 root = None
 status_label = None
 progress_bar = None
+
+# Add new global variable for cancel flag
+cancel_requested = False
 
 def fetch_sp500_tickers_from_csv():
     """Fetch S&P 500 tickers and names from a local CSV."""
@@ -29,14 +35,14 @@ def fetch_sp500_tickers_from_csv():
 
 def on_mode_change():
     """Update UI based on the selected mode."""
+    global visuals_checkbox  # Add global declaration
     mode = mode_var.get()
     search_entry.delete(0, tk.END)
     filter_table("")
 
-    # Always show the stock selection table
-    tree_frame.grid()
-    search_frame.grid()
-
+    # Always show the stock selection table and search frame
+    # These are now managed by pack, so no need to show/hide them
+    
     if mode == "Entire S&P 500":
         # Automatically check all stocks
         for row in tree.get_children():
@@ -45,6 +51,13 @@ def on_mode_change():
         # Clear all selections when switching
         for row in tree.get_children():
             tree.set(row, "Select", "")
+            
+    # Update the visuals checkbox state
+    if mode == "Single Stock":
+        visuals_checkbox.configure(state="normal")
+    else:
+        show_visuals_var.set(False)
+        visuals_checkbox.configure(state="disabled")
 
 def toggle_checkbox(event):
     """Toggle the checkbox state in the Treeview."""
@@ -60,15 +73,15 @@ def toggle_checkbox(event):
                 return
             current_value = tree.set(row_id, "Select")
             selected_stocks = [
-                tree.item(row)["values"][0]
-                for row in tree.get_children()
-                if tree.set(row, "Select") == "✓"
+                tree.item(r)["values"][0]
+                for r in tree.get_children()
+                if tree.set(r, "Select") == "✓"
             ]
 
             if mode == "Single Stock" and len(selected_stocks) >= 1 and current_value == "":
                 # Allow only one checkbox for Single Stock
-                for row in tree.get_children():
-                    tree.set(row, "Select", "")
+                for r in tree.get_children():
+                    tree.set(r, "Select", "")
                 tree.set(row_id, "Select", "✓")
             elif mode == "10 Stocks":
                 if len(selected_stocks) >= 10 and current_value == "":
@@ -84,7 +97,11 @@ def toggle_checkbox(event):
 def validate_stock_selection():
     """Validate stock selection based on the mode."""
     mode = mode_var.get()
-    selected_stocks = [tree.item(row)["values"][0] for row in tree.get_children() if tree.set(row, "Select") == "✓"]
+    selected_stocks = [
+        tree.item(r)["values"][0]
+        for r in tree.get_children()
+        if tree.set(r, "Select") == "✓"
+    ]
     
     if mode == "Single Stock" and len(selected_stocks) != 1:
         messagebox.showerror("Error", "Please select exactly one stock for Single Stock mode.")
@@ -98,7 +115,7 @@ def validate_stock_selection():
             return None
     if mode == "Entire S&P 500":
         # Ensure all stocks are selected
-        all_stocks = [tree.item(row)["values"][0] for row in tree.get_children()]
+        all_stocks = [tree.item(r)["values"][0] for r in tree.get_children()]
         if set(selected_stocks) != set(all_stocks):
             messagebox.showerror("Error", "All stocks must be selected for Entire S&P 500 mode.")
             return None
@@ -106,11 +123,34 @@ def validate_stock_selection():
 
 def filter_table(query):
     """Filter the table based on the search query."""
+    # Clear the main tree
     for row in tree.get_children():
         tree.delete(row)
-    for _, row in sp500_data.iterrows():
-        if query.lower() in row["Symbol"].lower() or query.lower() in row["Name"].lower():
-            tree.insert("", "end", values=(row["Symbol"], row["Name"], ""), tags=("row",))
+    
+    # Get all custom stocks from custom_tree if it exists and has items
+    custom_stocks = {}
+    if custom_tree and custom_tree.winfo_exists():
+        for row in custom_tree.get_children():
+            try:
+                values = custom_tree.item(row)["values"]
+                if values and len(values) >= 2:
+                    custom_stocks[values[0]] = values[1]
+            except Exception:
+                continue
+    
+    # Add custom stocks first
+    for symbol, name in custom_stocks.items():
+        if query.lower() in symbol.lower() or query.lower() in name.lower():
+            tree.insert("", "end", values=(symbol, name, ""), tags=("row",))
+    
+    # Then add S&P 500 stocks
+    if sp500_data is not None:
+        for _, row_data in sp500_data.iterrows():
+            if (query.lower() in str(row_data["Symbol"]).lower() or 
+                query.lower() in str(row_data["Name"]).lower()):
+                # Skip if this stock is already added as custom
+                if row_data["Symbol"] not in custom_stocks:
+                    tree.insert("", "end", values=(row_data["Symbol"], row_data["Name"], ""), tags=("row",))
 
 def set_status(text):
     """Update the status label in a thread-safe manner."""
@@ -123,13 +163,36 @@ def update_progress(value):
         progress_bar["value"] = value
         root.update_idletasks()
 
+def request_cancel():
+    """Request cancellation of the current operation."""
+    global cancel_requested
+    cancel_requested = True
+    set_status("Cancelling...")
+    # Immediately update UI to show cancellation
+    root.after(0, lambda: progress_bar.configure(value=0))
+    root.after(0, lambda: log_text.insert(tk.END, "\nOperation cancelled by user.\n"))
+    root.after(0, lambda: log_text.see(tk.END))
+
 def on_run_now():
     """Fetch data and execute the strategy in a separate thread with progress tracking."""
+    global cancel_requested, data  # Add data to globals
+    cancel_requested = False
+    data = None  # Initialize data as None
+    
+    # Disable the Run button and enable Cancel button
+    run_button.configure(state="disabled")
+    cancel_button.configure(state="normal")
+    
     def run_algorithm_thread():
-        global algorithm_results
+        global algorithm_results, cancel_requested, data  # Add data to globals
         try:
             set_status("Starting algorithm...")
             update_progress(0)
+
+            # Check for cancellation more frequently
+            if cancel_requested:
+                set_status("Operation cancelled.")
+                return
 
             mode = mode_var.get()
 
@@ -155,23 +218,19 @@ def on_run_now():
             time_frame = time_frame_var.get()
 
             # Decide if we are compounding or not
-            is_compounding = compounding_var.get()  # <-- from the new checkbox
+            is_compounding = compounding_var.get()
 
-            # Calculate start_date (or None) based on selected time frame
-            # We'll keep num_rows logic for partial data pulls 
+            # Calculate start_date or None + num_rows
             start_date_str = None
             num_rows = None
 
             if time_frame == "All Available":
-                # We set start_date_str to None to signal "fetch all"
                 start_date_str = None
-                # Also, don't limit num_rows in fetchdata
                 num_rows = None
             else:
-                # Default approach for time frames
                 if time_frame == "10 Years":
                     start_date_dt = end_date_dt - relativedelta(years=10)
-                    num_rows = 252 * 10  # approx trading days * years
+                    num_rows = 252 * 10
                 elif time_frame == "5 Years":
                     start_date_dt = end_date_dt - relativedelta(years=5)
                     num_rows = 252 * 5
@@ -191,7 +250,7 @@ def on_run_now():
                     start_date_dt = end_date_dt - relativedelta(months=1)
                     num_rows = 22
                 else:
-                    # Fallback: 5 Years as default
+                    # Fallback: 5 Years
                     start_date_dt = end_date_dt - relativedelta(years=5)
                     num_rows = 252 * 5
 
@@ -212,74 +271,144 @@ def on_run_now():
 
             total_selected = len(selected_stocks)
 
+            # Check for cancellation after each major step
+            if cancel_requested:
+                set_status("Operation cancelled.")
+                return
+
             # Fetch data
             set_status("Fetching data...")
             data = fetch_and_prepare_data(selected_stocks, start_date_str, end_date_str, num_rows)
             update_progress(20)
 
-            # Run algorithm
+            if cancel_requested:
+                set_status("Operation cancelled.")
+                return
+
+            # Run algorithm with more frequent cancellation checks
             set_status("Running algorithm...")
             total_algorithm_progress = 80
             per_stock_progress = total_algorithm_progress / total_selected if total_selected > 0 else total_algorithm_progress
 
             algorithm_results = {}
             for idx, ticker in enumerate(selected_stocks, start=1):
-                def progress_callback(algorithm_progress, current_stock_index=idx):
-                    overall_progress = 20 + (current_stock_index - 1) * per_stock_progress + (algorithm_progress / 100) * per_stock_progress
-                    overall_progress = min(overall_progress, 100)
-                    update_progress(overall_progress)
+                if cancel_requested:
+                    set_status("Operation cancelled.")
+                    return
 
-                set_status(f"Running algorithm on stock {idx}/{total_selected} ({ticker})...")
+                def progress_callback(algorithm_progress, current_stock_index=idx):
+                    if not cancel_requested:
+                        overall_progress = 20 + (current_stock_index - 1) * per_stock_progress + (algorithm_progress / 100) * per_stock_progress
+                        overall_progress = min(overall_progress, 100)
+                        update_progress(overall_progress)
+
+                set_status(f"Algorithm: {ticker} ({idx}/{total_selected})")
                 ticker_data = data[data['Ticker'] == ticker].copy()
                 if ticker_data.empty:
                     algorithm_results[ticker] = {"Error": "No data fetched for this ticker."}
                     progress_callback(100)
                 else:
                     result = algorithm.run_algorithm(
-                        ticker_data, 
-                        start_amount=10000, 
-                        progress_callback=progress_callback, 
-                        compounding=is_compounding  # <-- Pass our compounding flag
+                        ticker_data,
+                        start_amount=10000,
+                        progress_callback=progress_callback,
+                        compounding=is_compounding
                     )
                     algorithm_results[ticker] = result
                     progress_callback(100)
 
-            update_progress(100)
-            set_status("Finalizing...")
+                # Check for cancellation after each stock
+                if cancel_requested:
+                    set_status("Operation cancelled.")
+                    return
 
-            # Display results
-            log_text.delete(1.0, tk.END)
-            for ticker, result in algorithm_results.items():
-                log_text.insert(tk.END, f"Results for {ticker}:\n")
-                if "Error" in result:
-                    log_text.insert(tk.END, f"  {result['Error']}\n\n")
-                    continue
-                log_text.insert(tk.END, "  Output Results 1:\n")
-                for key, value in result['outputresults1'].items():
-                    log_text.insert(tk.END, f"    {key}: {value}\n")
-                log_text.insert(tk.END, "  Output Results 2:\n")
-                for key, value in result['outputresults2'].items():
-                    log_text.insert(tk.END, f"    {key}: {value}\n")
-                log_text.insert(tk.END, "\n")
-
-            messagebox.showinfo(
-                "Success", 
-                "Algorithm execution completed. You can view the trade tables using the 'Look at Trade Table' button."
-            )
-            set_status("Completed.")
-        except ValueError as e:
-            messagebox.showerror("Error", str(e))
-            update_progress(0)
-            set_status("Ready")
+            if not cancel_requested:
+                update_progress(100)
+                set_status("Finalizing...")
+                display_results()
+                
+                if not cancel_requested:
+                    messagebox.showinfo(
+                        "Success",
+                        "Algorithm execution completed. You can view the trade tables using the 'Look at Trade Table' button."
+                    )
+                    set_status("Completed.")
+            
         except Exception as e:
-            messagebox.showerror("Error", f"Unexpected error: {e}")
-            update_progress(0)
+            if not cancel_requested:
+                messagebox.showerror("Error", str(e))
             set_status("Ready")
         finally:
-            update_progress(100)
+            # Re-enable the Run button and disable Cancel button
+            root.after(0, lambda: run_button.configure(state="normal"))
+            root.after(0, lambda: cancel_button.configure(state="disabled"))
+            if cancel_requested:
+                update_progress(0)
+                set_status("Ready")
+            else:
+                update_progress(100)
 
     thread = threading.Thread(target=run_algorithm_thread)
     thread.start()
+
+def display_results():
+    """Display results in the log text area."""
+    global data  # Add global declaration
+    if cancel_requested:
+        return
+        
+    log_text.delete(1.0, tk.END)
+    
+    # Create a header
+    log_text.insert(tk.END, "ALGORITHM RESULTS\n")
+    log_text.insert(tk.END, "=" * 50 + "\n\n")
+    
+    for ticker, result in algorithm_results.items():
+        # Stock header
+        log_text.insert(tk.END, f"📈 {ticker}\n")
+        log_text.insert(tk.END, "-" * 30 + "\n")
+        
+        if "Error" in result:
+            log_text.insert(tk.END, f"❌ Error: {result['Error']}\n\n")
+            continue
+            
+        # Performance Metrics
+        log_text.insert(tk.END, "📊 Performance Metrics\n")
+        log_text.insert(tk.END, f"Return vs Buy & Hold: {result['outputresults1']['betteroff']*100:.2f}%\n")
+        log_text.insert(tk.END, f"Taxed Return: {result['outputresults1']['besttaxedreturn']:.2f}%\n")
+        log_text.insert(tk.END, f"Buy & Hold Return: {result['outputresults1']['noalgoreturn']:.2f}%\n")
+        log_text.insert(tk.END, f"Max Drawdown: {result['outputresults2']['maxdrawdown(worst trade return pct)']*100:.2f}%\n")
+        log_text.insert(tk.END, "\n")
+        
+        # Trading Statistics
+        log_text.insert(tk.END, "🎯 Trading Statistics\n")
+        log_text.insert(tk.END, f"Total Trades: {result['outputresults1']['besttradecount']}\n")
+        log_text.insert(tk.END, f"Win Rate: {result['outputresults2']['winningtradepct']*100:.1f}%\n")
+        log_text.insert(tk.END, f"Average Hold Time: {result['outputresults2']['average_hold_time']:.1f} days\n")
+        log_text.insert(tk.END, f"Win Rate (Last 4): {result['outputresults2']['win_percentage_last_4_trades']*100:.1f}%\n")
+        log_text.insert(tk.END, "\n")
+        
+        # Strategy Parameters
+        log_text.insert(tk.END, "⚙️ Strategy Parameters\n")
+        log_text.insert(tk.END, f"Input 1: {result['outputresults1']['besta']}\n")
+        log_text.insert(tk.END, f"Input 2: {result['outputresults1']['bestb']}\n")
+        log_text.insert(tk.END, f"Average Trade %: {result['outputresults1']['avgtradepct']*100:.2f}%\n")
+        log_text.insert(tk.END, "\n")
+        
+        # Portfolio Value
+        log_text.insert(tk.END, "💰 Portfolio Value\n")
+        log_text.insert(tk.END, f"Final Value: ${result['outputresults2']['bestendtaxed_liquidity']:,.2f}\n")
+        log_text.insert(tk.END, f"Buy & Hold Value: ${result['outputresults2']['(noalgoreturn+1)*startamount']:,.2f}\n")
+        log_text.insert(tk.END, "\n" + "=" * 50 + "\n\n")
+
+    # Show interactive chart if enabled and in single stock mode
+    mode = mode_var.get()
+    if show_visuals_var.get() and mode == "Single Stock" and not cancel_requested:
+        single_ticker = list(algorithm_results.keys())[0]
+        single_result = algorithm_results[single_ticker]
+        if "Error" not in single_result and data is not None:
+            ticker_df = data[data["Ticker"] == single_ticker].copy()
+            visual.show_interactive_chart(single_ticker, ticker_df, single_result)
 
 def view_trade_table():
     """Open a new window to display the best trades for selected tickers."""
@@ -305,13 +434,10 @@ def view_trade_table():
     tree_scroll_x = ttk.Scrollbar(tree_frame_trade, orient="horizontal")
     tree_scroll_x.pack(side="bottom", fill="x")
 
-    tree_trade = ttk.Treeview(
-        tree_frame_trade, 
-        yscrollcommand=tree_scroll_y.set, 
-        xscrollcommand=tree_scroll_x.set
-    )
+    tree_trade = ttk.Treeview(tree_frame_trade,
+                              yscrollcommand=tree_scroll_y.set,
+                              xscrollcommand=tree_scroll_x.set)
     tree_trade.pack(fill="both", expand=True)
-
     tree_scroll_y.config(command=tree_trade.yview)
     tree_scroll_x.config(command=tree_trade.xview)
 
@@ -430,105 +556,276 @@ def export_results_to_csv():
     except Exception as e:
         messagebox.showerror("Error", f"Failed to save CSV file: {e}")
 
+def add_custom_stock():
+    """Add a custom stock symbol to the selection table."""
+    custom_symbol = custom_stock_entry.get().strip().upper()
+    if not custom_symbol:
+        messagebox.showwarning("Warning", "Please enter a stock symbol.")
+        return
+    
+    # Check if stock already exists in either table
+    exists_in_main = any(
+        tree.item(row)["values"][0] == custom_symbol
+        for row in tree.get_children()
+    )
+    exists_in_custom = any(
+        custom_tree.item(row)["values"][0] == custom_symbol
+        for row in custom_tree.get_children()
+    )
+    
+    if exists_in_main or exists_in_custom:
+        messagebox.showwarning("Warning", f"Stock {custom_symbol} already exists in the table.")
+        return
+    
+    try:
+        # Try to fetch the stock name using yfinance
+        import yfinance as yf
+        stock = yf.Ticker(custom_symbol)
+        info = stock.info
+        if not info:
+            raise ValueError("Could not fetch stock information")
+        stock_name = info.get('longName', f"Custom Stock ({custom_symbol})")
+        
+        # Add to custom stocks table
+        custom_tree.insert("", "end", values=(custom_symbol, stock_name))
+        
+        # Add to main selection table and handle mode-specific behavior
+        tree_item = tree.insert("", "end", values=(custom_symbol, stock_name, ""), tags=("row",))
+        
+        # Handle mode-specific behavior
+        mode = mode_var.get()
+        if mode == "Entire S&P 500":
+            # Automatically check all stocks
+            for row in tree.get_children():
+                tree.set(row, "Select", "✓")
+        elif mode == "Single Stock":
+            # Clear all selections and select only the new stock
+            for row in tree.get_children():
+                tree.set(row, "Select", "")
+            tree.set(tree_item, "Select", "✓")
+        elif mode == "10 Stocks":
+            # Count current selections
+            selected_count = sum(1 for row in tree.get_children() if tree.set(row, "Select") == "✓")
+            if selected_count < 10:
+                tree.set(tree_item, "Select", "✓")
+        
+        custom_stock_entry.delete(0, tk.END)  # Clear the entry field
+        
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to add stock {custom_symbol}: {str(e)}")
+        return
+
 def create_ui():
     global root, mode_var, sp500_data, tree, search_entry, tree_frame, search_frame
     global end_date_entry, log_text, progress_bar, status_label
-    global time_frame_var, compounding_var
+    global time_frame_var, compounding_var, custom_stock_entry, custom_tree
+    global show_visuals_var, visuals_checkbox, data  # Add data to globals
 
     sp500_data = fetch_sp500_tickers_from_csv()
 
     root = tk.Tk()
     root.title("SMA Trading Simulation")
-    root.geometry("1000x900")  # a bit taller
+    root.geometry("1200x900")  # Increased width for better layout
 
+    # Create main container frame
+    main_frame = ttk.Frame(root, padding="10")
+    main_frame.grid(row=0, column=0, sticky="nsew")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    # Mode Selection Frame
+    mode_frame = ttk.LabelFrame(main_frame, text="Trading Mode", padding="5")
+    mode_frame.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
     mode_var = tk.StringVar(value="Single Stock")
-    ttk.Label(root, text="Select Mode:", font=("Arial", 12)).grid(row=0, column=0, padx=10, pady=10, sticky="w")
-    modes = ["Entire S&P 500", "10 Stocks", "Single Stock", "Multi Select"]
+    modes = ["Single Stock", "10 Stocks", "Multi Select", "Entire S&P 500"]
     for i, mode in enumerate(modes):
-        ttk.Radiobutton(root, text=mode, variable=mode_var, value=mode, command=on_mode_change).grid(row=0, column=i+1, padx=10, pady=10)
+        ttk.Radiobutton(mode_frame, text=mode, variable=mode_var, value=mode, command=on_mode_change).grid(
+            row=0, column=i, padx=20, pady=5
+        )
 
-    search_frame = ttk.LabelFrame(root, text="Search Stocks")
-    search_frame.grid(row=1, column=0, columnspan=5, padx=10, pady=5, sticky="ew")
-    search_label = ttk.Label(search_frame, text="Search:")
-    search_label.grid(row=0, column=0, padx=5, pady=5)
-    search_entry = ttk.Entry(search_frame, width=30)
-    search_entry.grid(row=0, column=1, padx=5, pady=5)
+    # Left Column Frame (Custom Stock + Search)
+    left_frame = ttk.Frame(main_frame)
+    left_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+    
+    # Custom Stock Entry Frame
+    custom_frame = ttk.LabelFrame(left_frame, text="Add Custom Stock", padding="5")
+    custom_frame.pack(fill="x", pady=(0, 5))
+    
+    entry_frame = ttk.Frame(custom_frame)
+    entry_frame.pack(fill="x", padx=5, pady=5)
+    ttk.Label(entry_frame, text="Stock Symbol:").pack(side="left", padx=(0, 5))
+    custom_stock_entry = ttk.Entry(entry_frame, width=15)
+    custom_stock_entry.pack(side="left", padx=5)
+    ttk.Button(entry_frame, text="Add Stock", command=add_custom_stock).pack(side="left", padx=5)
+    
+    # Custom stocks table with scrollbar
+    custom_tree_frame = ttk.Frame(custom_frame)
+    custom_tree_frame.pack(fill="x", padx=5, pady=5)
+    
+    custom_scroll = ttk.Scrollbar(custom_tree_frame)
+    custom_scroll.pack(side="right", fill="y")
+    
+    custom_tree = ttk.Treeview(
+        custom_tree_frame,
+        columns=("Symbol", "Name"),
+        show="headings",
+        height=3,
+        yscrollcommand=custom_scroll.set,
+        selectmode="none"  # Prevent selection in the custom tree
+    )
+    custom_tree.heading("Symbol", text="Symbol")
+    custom_tree.heading("Name", text="Name")
+    custom_tree.column("Symbol", width=100)
+    custom_tree.column("Name", width=250)
+    custom_tree.pack(side="left", fill="x", expand=True)
+    custom_scroll.config(command=custom_tree.yview)
+
+    # Search Frame
+    search_frame = ttk.LabelFrame(left_frame, text="Search Stocks", padding="5")
+    search_frame.pack(fill="x")
+    ttk.Label(search_frame, text="Search:").pack(side="left", padx=5)
+    search_entry = ttk.Entry(search_frame, width=40)
+    search_entry.pack(side="left", padx=5, pady=5, fill="x", expand=True)
     search_entry.bind("<KeyRelease>", lambda e: filter_table(search_entry.get()))
 
-    tree_frame = ttk.LabelFrame(root, text="Stock Selection")
-    tree_frame.grid(row=2, column=0, columnspan=5, padx=10, pady=5, sticky="ew")
-    tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical")
-    tree_scroll.pack(side="right", fill="y")
+    # Right Column Frame (Settings)
+    right_frame = ttk.Frame(main_frame)
+    right_frame.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
+    
+    # Settings Frame
+    settings_frame = ttk.LabelFrame(right_frame, text="Settings", padding="5")
+    settings_frame.pack(fill="x")
+    
+    # Date and Time Frame settings
+    date_frame = ttk.Frame(settings_frame)
+    date_frame.pack(fill="x", pady=5)
+    ttk.Label(date_frame, text="End Date:").pack(side="left", padx=5)
+    end_date_entry = ttk.Entry(date_frame, width=15)
+    end_date_entry.pack(side="left", padx=5)
+    end_date_entry.insert(0, (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
+
+    time_frame = ttk.Frame(settings_frame)
+    time_frame.pack(fill="x", pady=5)
+    ttk.Label(time_frame, text="Time Frame:").pack(side="left", padx=5)
+    time_frame_var = tk.StringVar(value="5 Years")
+    time_frame_options = ["All Available", "10 Years", "5 Years", "3 Years", "1 Year", "6 Months", "3 Months", "1 Month"]
+    time_frame_combobox = ttk.Combobox(time_frame, textvariable=time_frame_var, values=time_frame_options, state="readonly", width=15)
+    time_frame_combobox.pack(side="left", padx=5)
+
+    # Options Frame
+    options_frame = ttk.Frame(settings_frame)
+    options_frame.pack(fill="x", pady=5)
+    
+    compounding_var = tk.BooleanVar(value=True)
+    compounding_checkbox = ttk.Checkbutton(
+        options_frame, 
+        text="Compound Gains",
+        variable=compounding_var
+    )
+    compounding_checkbox.pack(side="left", padx=5)
+
+    show_visuals_var = tk.BooleanVar(value=True)
+    visuals_checkbox = ttk.Checkbutton(
+        options_frame,
+        text="Show Interactive Charts",
+        variable=show_visuals_var,
+        state="normal" if mode_var.get() == "Single Stock" else "disabled"
+    )
+    visuals_checkbox.pack(side="left", padx=20)
+
+    # Stock Selection Frame
+    selection_frame = ttk.LabelFrame(main_frame, text="Stock Selection", padding="5")
+    selection_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+    
+    # Create a container for search and tree
+    selection_container = ttk.Frame(selection_frame)
+    selection_container.pack(fill="both", expand=True, padx=5, pady=5)
+    
+    # Tree Frame
+    tree_frame = ttk.Frame(selection_container)
+    tree_frame.pack(fill="both", expand=True)
+    
+    tree_scroll_y = ttk.Scrollbar(tree_frame)
+    tree_scroll_y.pack(side="right", fill="y")
     tree_scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal")
     tree_scroll_x.pack(side="bottom", fill="x")
 
-    tree = ttk.Treeview(tree_frame, columns=("Symbol", "Name", "Select"), show="headings",
-                        yscrollcommand=tree_scroll.set, xscrollcommand=tree_scroll_x.set)
-    tree_scroll.config(command=tree.yview)
+    tree = ttk.Treeview(
+        tree_frame, 
+        columns=("Symbol", "Name", "Select"), 
+        show="headings",
+        yscrollcommand=tree_scroll_y.set,
+        xscrollcommand=tree_scroll_x.set,
+        height=15  # Increased height for better visibility
+    )
+    tree_scroll_y.config(command=tree.yview)
     tree_scroll_x.config(command=tree.xview)
     tree.heading("Symbol", text="Ticker")
     tree.heading("Name", text="Name")
     tree.heading("Select", text="Select")
+    tree.column("Symbol", width=100)
+    tree.column("Name", width=400)
     tree.column("Select", width=50, anchor="center")
     tree.bind("<Button-1>", toggle_checkbox)
     tree.pack(fill="both", expand=True)
+    
+    # Initial population of the table
     filter_table("")
 
-    ttk.Label(root, text="End Date:", font=("Arial", 12)).grid(row=3, column=0, padx=10, pady=10, sticky="e")
-    end_date_entry = ttk.Entry(root, width=15)
-    end_date_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
-    end_date_entry.insert(0, (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
-
-    # --------- Time Frame Combobox ---------
-    ttk.Label(root, text="Time Frame:", font=("Arial", 12)).grid(row=3, column=2, padx=10, pady=10, sticky="e")
-
-    # Added a range of time frames including All Available
-    time_frame_var = tk.StringVar(value="5 Years")
-    time_frame_options = [
-        "All Available",
-        "10 Years",
-        "5 Years",
-        "3 Years",
-        "1 Year",
-        "6 Months",
-        "3 Months",
-        "1 Month"
-    ]
-    time_frame_combobox = ttk.Combobox(root, textvariable=time_frame_var, values=time_frame_options, state="readonly")
-    time_frame_combobox.grid(row=3, column=3, padx=10, pady=10, sticky="w")
-
-    # --------- NEW: Compounding Checkbox ---------
-    compounding_var = tk.BooleanVar(value=True)
-    compounding_checkbox = ttk.Checkbutton(
-        root, 
-        text="Compound Gains?", 
-        variable=compounding_var
-    )
-    compounding_checkbox.grid(row=3, column=4, padx=10, pady=10, sticky="w")
-
-    button_frame = ttk.Frame(root)
-    button_frame.grid(row=4, column=0, columnspan=5, pady=10)
-
-    run_button = ttk.Button(button_frame, text="Run Now", command=on_run_now)
+    # Button Frame
+    button_frame = ttk.Frame(main_frame)
+    button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+    
+    style = ttk.Style()
+    style.configure("Action.TButton", padding=5)
+    style.configure("Cancel.TButton", padding=5)
+    
+    global run_button, cancel_button
+    run_button = ttk.Button(button_frame, text="Run Now", command=on_run_now, style="Action.TButton")
     run_button.pack(side="left", padx=10)
-
-    trade_table_button = ttk.Button(button_frame, text="Look at Trade Table", command=view_trade_table)
+    
+    # Create a frame for the cancel button to give it a red background
+    cancel_frame = ttk.Frame(button_frame)
+    cancel_frame.pack(side="left", padx=10)
+    cancel_frame.configure(style="Cancel.TFrame")
+    
+    cancel_button = ttk.Button(
+        cancel_frame, 
+        text="Cancel", 
+        command=request_cancel, 
+        style="Cancel.TButton",
+        state="disabled"
+    )
+    cancel_button.pack()
+    
+    trade_table_button = ttk.Button(button_frame, text="Look at Trade Table", command=view_trade_table, style="Action.TButton")
     trade_table_button.pack(side="left", padx=10)
-
-    export_button = ttk.Button(button_frame, text="Export Results to CSV", command=export_results_to_csv)
+    
+    export_button = ttk.Button(button_frame, text="Export Results to CSV", command=export_results_to_csv, style="Action.TButton")
     export_button.pack(side="left", padx=10)
 
-    ttk.Label(root, text="Logs:", font=("Arial", 12)).grid(row=5, column=0, padx=10, pady=10, sticky="w")
+    # Log Frame
+    log_frame = ttk.LabelFrame(main_frame, text="Logs", padding="5")
+    log_frame.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+    
+    log_text = tk.Text(log_frame, height=10, width=120, wrap="word")
+    log_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-    log_text = tk.Text(root, height=15, width=120, wrap="word")
-    log_text.grid(row=6, column=0, columnspan=5, padx=10, pady=10)
+    # Status Bar
+    status_frame = ttk.Frame(main_frame)
+    status_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+    
+    status_label = ttk.Label(status_frame, text="Ready", font=("Arial", 10))
+    status_label.pack(side="left")
+    
+    progress_bar = ttk.Progressbar(status_frame, mode="determinate", maximum=100)
+    progress_bar.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
-    # Status + Progress
-    status_label = ttk.Label(root, text="Ready", font=("Arial", 10))
-    status_label.grid(row=7, column=0, columnspan=5, padx=10, sticky="w")
-
-    progress_bar = ttk.Progressbar(root, mode="determinate", maximum=100)
-    progress_bar.grid(row=8, column=0, columnspan=5, padx=10, pady=10, sticky="ew")
+    # Configure grid weights
+    main_frame.columnconfigure(0, weight=1)
+    main_frame.columnconfigure(1, weight=1)
+    main_frame.rowconfigure(2, weight=1)
+    main_frame.rowconfigure(4, weight=1)
 
     root.mainloop()
 
