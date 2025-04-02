@@ -358,55 +358,25 @@ def display_results():
         return
         
     log_text.delete(1.0, tk.END)
-    
-    # Create a header
-    log_text.insert(tk.END, "ALGORITHM RESULTS\n")
-    log_text.insert(tk.END, "=" * 50 + "\n\n")
-    
     for ticker, result in algorithm_results.items():
-        # Stock header
-        log_text.insert(tk.END, f"📈 {ticker}\n")
-        log_text.insert(tk.END, "-" * 30 + "\n")
-        
+        log_text.insert(tk.END, f"Results for {ticker}:\n")
         if "Error" in result:
-            log_text.insert(tk.END, f"❌ Error: {result['Error']}\n\n")
+            log_text.insert(tk.END, f"  {result['Error']}\n\n")
             continue
-            
-        # Performance Metrics
-        log_text.insert(tk.END, "📊 Performance Metrics\n")
-        log_text.insert(tk.END, f"Return vs Buy & Hold: {result['outputresults1']['betteroff']*100:.2f}%\n")
-        log_text.insert(tk.END, f"Taxed Return: {result['outputresults1']['besttaxedreturn']:.2f}%\n")
-        log_text.insert(tk.END, f"Buy & Hold Return: {result['outputresults1']['noalgoreturn']:.2f}%\n")
-        log_text.insert(tk.END, f"Max Drawdown: {result['outputresults2']['maxdrawdown(worst trade return pct)']*100:.2f}%\n")
+        log_text.insert(tk.END, "  Output Results 1:\n")
+        for key, value in result['outputresults1'].items():
+            log_text.insert(tk.END, f"    {key}: {value}\n")
+        log_text.insert(tk.END, "  Output Results 2:\n")
+        for key, value in result['outputresults2'].items():
+            log_text.insert(tk.END, f"    {key}: {value}\n")
         log_text.insert(tk.END, "\n")
-        
-        # Trading Statistics
-        log_text.insert(tk.END, "🎯 Trading Statistics\n")
-        log_text.insert(tk.END, f"Total Trades: {result['outputresults1']['besttradecount']}\n")
-        log_text.insert(tk.END, f"Win Rate: {result['outputresults2']['winningtradepct']*100:.1f}%\n")
-        log_text.insert(tk.END, f"Average Hold Time: {result['outputresults2']['average_hold_time']:.1f} days\n")
-        log_text.insert(tk.END, f"Win Rate (Last 4): {result['outputresults2']['win_percentage_last_4_trades']*100:.1f}%\n")
-        log_text.insert(tk.END, "\n")
-        
-        # Strategy Parameters
-        log_text.insert(tk.END, "⚙️ Strategy Parameters\n")
-        log_text.insert(tk.END, f"Input 1: {result['outputresults1']['besta']}\n")
-        log_text.insert(tk.END, f"Input 2: {result['outputresults1']['bestb']}\n")
-        log_text.insert(tk.END, f"Average Trade %: {result['outputresults1']['avgtradepct']*100:.2f}%\n")
-        log_text.insert(tk.END, "\n")
-        
-        # Portfolio Value
-        log_text.insert(tk.END, "💰 Portfolio Value\n")
-        log_text.insert(tk.END, f"Final Value: ${result['outputresults2']['bestendtaxed_liquidity']:,.2f}\n")
-        log_text.insert(tk.END, f"Buy & Hold Value: ${result['outputresults2']['(noalgoreturn+1)*startamount']:,.2f}\n")
-        log_text.insert(tk.END, "\n" + "=" * 50 + "\n\n")
 
     # Show interactive chart if enabled and in single stock mode
     mode = mode_var.get()
     if show_visuals_var.get() and mode == "Single Stock" and not cancel_requested:
         single_ticker = list(algorithm_results.keys())[0]
         single_result = algorithm_results[single_ticker]
-        if "Error" not in single_result and data is not None:
+        if "Error" not in single_result and data is not None:  # Add check for data
             ticker_df = data[data["Ticker"] == single_ticker].copy()
             visual.show_interactive_chart(single_ticker, ticker_df, single_result)
 
