@@ -220,6 +220,9 @@ def on_run_now():
             # Decide if we are compounding or not
             is_compounding = compounding_var.get()
 
+            # Get optimization objective
+            optimization_objective = optimization_mapping.get(optimization_objective_var.get(), "taxed_return")
+
             # Calculate start_date or None + num_rows
             start_date_str = None
             num_rows = None
@@ -312,7 +315,8 @@ def on_run_now():
                         ticker_data,
                         start_amount=10000,
                         progress_callback=progress_callback,
-                        compounding=is_compounding
+                        compounding=is_compounding,
+                        optimization_objective=optimization_objective
                     )
                     algorithm_results[ticker] = result
                     progress_callback(100)
@@ -368,6 +372,9 @@ def display_results():
             log_text.insert(tk.END, f"    {key}: {value}\n")
         log_text.insert(tk.END, "  Output Results 2:\n")
         for key, value in result['outputresults2'].items():
+            log_text.insert(tk.END, f"    {key}: {value}\n")
+        log_text.insert(tk.END, "  Parameter Stability Metrics:\n")
+        for key, value in result['param_stability'].items():
             log_text.insert(tk.END, f"    {key}: {value}\n")
         log_text.insert(tk.END, "\n")
 
@@ -460,6 +467,7 @@ def export_results_to_csv():
 
         output1 = result.get("outputresults1", {})
         output2 = result.get("outputresults2", {})
+        param_stability = result.get("param_stability", {})
 
         besta = output1.get("besta", "")
         bestb = output1.get("bestb", "")
@@ -471,12 +479,17 @@ def export_results_to_csv():
         besttradecount = output1.get("besttradecount", 0)
         avg_hold_time = output2.get("average_hold_time", 0)
         win_pct_last_4 = output2.get("win_percentage_last_4_trades", None)
+        optimization_objective = output1.get("optimization_objective", "taxed_return")
+
+        # Convert internal value to display label for export
+        optimization_display = {v: k for k, v in optimization_mapping.items()}.get(optimization_objective, "Taxed Return")
 
         export_row = {
             "Symbol": symbol,
             "Test Date": today_str,
             "strategy": strategy,
             "Total Timeframe": total_timeframe,
+            "Optimization Objective": optimization_display,
             "Input 1": besta,
             "Input 2": bestb,
             "5 year diff - %": betteroff,
@@ -486,7 +499,35 @@ def export_results_to_csv():
             "Max Drawdown": maxdrawdown,
             "# of Closed Trades": besttradecount,
             "Avg Hold Time": avg_hold_time,
-            "Win % Last 4 Trades": win_pct_last_4
+            "Win % Last 4 Trades": win_pct_last_4,
+            # Parameter Stability Metrics - Taxed Return
+            "Taxed Return Avg": param_stability.get("taxed_return_avg", 0),
+            "Taxed Return Std": param_stability.get("taxed_return_std", 0),
+            "Taxed Return Max": param_stability.get("taxed_return_max", 0),
+            "Taxed Return Min": param_stability.get("taxed_return_min", 0),
+            "Taxed Return Max-Min": param_stability.get("taxed_return_max_min_diff", 0),
+            "Taxed Return Max-Avg": param_stability.get("taxed_return_max_avg_diff", 0),
+            # Parameter Stability Metrics - Better Off
+            "Better Off Avg": param_stability.get("better_off_avg", 0),
+            "Better Off Std": param_stability.get("better_off_std", 0),
+            "Better Off Max": param_stability.get("better_off_max", 0),
+            "Better Off Min": param_stability.get("better_off_min", 0),
+            "Better Off Max-Min": param_stability.get("better_off_max_min_diff", 0),
+            "Better Off Max-Avg": param_stability.get("better_off_max_avg_diff", 0),
+            # Parameter Stability Metrics - Win Rate
+            "Win Rate Avg": param_stability.get("win_rate_avg", 0),
+            "Win Rate Std": param_stability.get("win_rate_std", 0),
+            "Win Rate Max": param_stability.get("win_rate_max", 0),
+            "Win Rate Min": param_stability.get("win_rate_min", 0),
+            "Win Rate Max-Min": param_stability.get("win_rate_max_min_diff", 0),
+            "Win Rate Max-Avg": param_stability.get("win_rate_max_avg_diff", 0),
+            # Parameter Stability Metrics - Trade Count
+            "Trade Count Avg": param_stability.get("trade_count_avg", 0),
+            "Trade Count Std": param_stability.get("trade_count_std", 0),
+            "Trade Count Max": param_stability.get("trade_count_max", 0),
+            "Trade Count Min": param_stability.get("trade_count_min", 0),
+            "Trade Count Max-Min": param_stability.get("trade_count_max_min_diff", 0),
+            "Trade Count Max-Avg": param_stability.get("trade_count_max_avg_diff", 0)
         }
 
         export_data.append(export_row)
@@ -496,6 +537,7 @@ def export_results_to_csv():
         "Test Date",
         "strategy",
         "Total Timeframe",
+        "Optimization Objective",
         "Input 1",
         "Input 2",
         "5 year diff - %",
@@ -505,7 +547,35 @@ def export_results_to_csv():
         "Max Drawdown",
         "# of Closed Trades",
         "Avg Hold Time",
-        "Win % Last 4 Trades"
+        "Win % Last 4 Trades",
+        # Parameter Stability Metrics - Taxed Return
+        "Taxed Return Avg",
+        "Taxed Return Std",
+        "Taxed Return Max",
+        "Taxed Return Min",
+        "Taxed Return Max-Min",
+        "Taxed Return Max-Avg",
+        # Parameter Stability Metrics - Better Off
+        "Better Off Avg",
+        "Better Off Std",
+        "Better Off Max",
+        "Better Off Min",
+        "Better Off Max-Min",
+        "Better Off Max-Avg",
+        # Parameter Stability Metrics - Win Rate
+        "Win Rate Avg",
+        "Win Rate Std",
+        "Win Rate Max",
+        "Win Rate Min",
+        "Win Rate Max-Min",
+        "Win Rate Max-Avg",
+        # Parameter Stability Metrics - Trade Count
+        "Trade Count Avg",
+        "Trade Count Std",
+        "Trade Count Max",
+        "Trade Count Min",
+        "Trade Count Max-Min",
+        "Trade Count Max-Avg"
     ])
 
     if export_df.empty:
@@ -589,7 +659,8 @@ def create_ui():
     global root, mode_var, sp500_data, tree, search_entry, tree_frame, search_frame
     global end_date_entry, log_text, progress_bar, status_label
     global time_frame_var, compounding_var, custom_stock_entry, custom_tree
-    global show_visuals_var, visuals_checkbox, data  # Add data to globals
+    global show_visuals_var, visuals_checkbox, data, optimization_objective_var  # Add optimization_objective_var to globals
+    global optimization_mapping  # Add optimization_mapping to globals
 
     sp500_data = fetch_sp500_tickers_from_csv()
 
@@ -681,6 +752,26 @@ def create_ui():
     time_frame_options = ["All Available", "10 Years", "5 Years", "3 Years", "1 Year", "6 Months", "3 Months", "1 Month"]
     time_frame_combobox = ttk.Combobox(time_frame, textvariable=time_frame_var, values=time_frame_options, state="readonly", width=15)
     time_frame_combobox.pack(side="left", padx=5)
+
+    # Optimization Objective Frame
+    optimization_frame = ttk.Frame(settings_frame)
+    optimization_frame.pack(fill="x", pady=5)
+    ttk.Label(optimization_frame, text="Optimization:").pack(side="left", padx=5)
+    optimization_objective_var = tk.StringVar(value="taxed_return")
+    optimization_options = ["taxed_return", "better_off", "win_rate"]
+    optimization_labels = ["Taxed Return", "Better Off", "Win Rate"]
+    optimization_combobox = ttk.Combobox(optimization_frame, textvariable=optimization_objective_var, values=optimization_labels, state="readonly", width=15)
+    optimization_combobox.pack(side="left", padx=5)
+    
+    # Map display labels to internal values
+    optimization_mapping = {
+        "Taxed Return": "taxed_return",
+        "Better Off": "better_off", 
+        "Win Rate": "win_rate"
+    }
+    
+    # Set initial value
+    optimization_objective_var.set("Taxed Return")
 
     # Options Frame
     options_frame = ttk.Frame(settings_frame)

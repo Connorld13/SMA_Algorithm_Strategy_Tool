@@ -5,7 +5,7 @@ import pandas as pd
 from datetime import datetime
 import time
 
-def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=True):
+def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=True, optimization_objective="taxed_return"):
     """
     Runs the SMA trading algorithm on the provided stock data.
 
@@ -14,6 +14,7 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         start_amount (float): Initial amount of liquidity.
         progress_callback (function): Function to call with progress updates (percentage).
         compounding (bool): If True, reinvest gains after each trade; if False, do not reinvest.
+        optimization_objective (str): Objective to optimize for - "taxed_return", "better_off", or "win_rate"
     
     Returns:
         dict: A dictionary containing output results and best trades.
@@ -70,6 +71,13 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
     combinations = (((aend - astart) // inc) + 1) * (((bend - bstart) // inc) + 1)
     iterations = 0
 
+    # Arrays to store all results for parameter stability analysis
+    all_taxed_returns = []
+    all_better_off = []
+    all_win_rates = []
+    all_trade_counts = []
+    all_parameters = []  # Store (a, b) pairs
+
     # Loop through SMA combinations
     for a in range(astart, aend + 1, inc):
         # Recompute SMA1 for current 'a'
@@ -88,7 +96,7 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
             if compounding:
                 current_liquidity = start_amount
             else:
-                # If not compounding, we’ll keep current_liquidity the same
+                # If not compounding, we'll keep current_liquidity the same
                 # but track profit separately in running_pnl
                 current_liquidity = start_amount
                 running_pnl = 0.0
@@ -239,7 +247,7 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
             over1yearpl = 0.0
 
             if compounding:
-                # We'll “simulate” the rolling liquidity for short vs. long-term splits
+                # We'll "simulate" the rolling liquidity for short vs. long-term splits
                 rolling_liquidity = start_amount
                 for tr in trades:
                     if tr['Buy/Sell'] == -1:
@@ -275,30 +283,17 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
             endtaxed_liquidity = start_amount + taxcumpl
             taxcumreturn = (endtaxed_liquidity / start_amount) - 1
 
-            # Update best result if current is better
-            if taxcumreturn > besttaxedreturn:
-                besttaxedreturn = taxcumreturn
-                besta = a
-                bestb = b
-                besttradecount = tradecount_
-                besttrades = trades.copy()
-                bestendtaxed_liquidity = endtaxed_liquidity
+            # Calculate win rate for this combination
+            sell_trades = [t for t in trades if t['Buy/Sell'] == -1]
+            total_sell_trades = len(sell_trades)
+            winning_trades = sum(1 for t in sell_trades if t.get('PreTaxReturn', 0) > 0)
+            win_rate = winning_trades / total_sell_trades if total_sell_trades > 0 else 0
 
-                # Collect stats
-                sell_trades = [t for t in besttrades if t['Buy/Sell'] == -1]
-                total_sell_trades = len(sell_trades)
-                losingtrades = sum(1 for t in sell_trades if t.get('PreTaxReturn', 0) < 0)
-                winningtrades = total_sell_trades - losingtrades
-
-                losingtradepct = losingtrades / total_sell_trades if total_sell_trades else 0
-                winningtradepct = winningtrades / total_sell_trades if total_sell_trades else 0
-
-                hold_times = [t['HoldTime'] for t in sell_trades]
-                average_hold_time = sum(hold_times) / len(hold_times) if hold_times else 0
-
-                last_4_trades = sell_trades[-4:]
-                wins_last_4 = sum(1 for t in last_4_trades if t['PreTaxReturn'] > 0)
-                win_percentage_last_4_trades = (wins_last_4 / 4) if len(last_4_trades) == 4 else None
+            # Store results for parameter stability analysis
+            all_taxed_returns.append(taxcumreturn)
+            all_trade_counts.append(tradecount_)
+            all_parameters.append((a, b))
+            all_win_rates.append(win_rate)
 
             # Increment iteration, update progress if provided
             iterations += 1
@@ -324,6 +319,192 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         else:
             noalgoreturn = price_return
 
+    # Calculate better off for all combinations
+    for i, tax_return in enumerate(all_taxed_returns):
+        if noalgoreturn != 0:
+            better_off = (tax_return - noalgoreturn) / abs(noalgoreturn)
+        else:
+            if tax_return > 0:
+                better_off = np.inf
+            elif tax_return < 0:
+                better_off = -np.inf
+            else:
+                better_off = 0
+        all_better_off.append(better_off)
+
+    # Find best combination based on optimization objective
+    if optimization_objective == "taxed_return":
+        best_idx = np.argmax(all_taxed_returns)
+        besttaxedreturn = all_taxed_returns[best_idx]
+    elif optimization_objective == "better_off":
+        best_idx = np.argmax(all_better_off)
+        besttaxedreturn = all_taxed_returns[best_idx]
+    elif optimization_objective == "win_rate":
+        best_idx = np.argmax(all_win_rates)
+        besttaxedreturn = all_taxed_returns[best_idx]
+    else:
+        # Default to taxed return
+        best_idx = np.argmax(all_taxed_returns)
+        besttaxedreturn = all_taxed_returns[best_idx]
+
+    besta, bestb = all_parameters[best_idx]
+    besttradecount = all_trade_counts[best_idx]
+
+    # Recalculate best trades for the best combination
+    sma1 = stocks[stockcol].rolling(window=besta, min_periods=besta).mean().fillna(0).values
+    sma2 = stocks[stockcol].rolling(window=bestb, min_periods=bestb).mean().fillna(0).values
+    smadiff = sma1 - sma2
+
+    # Generate best trades
+    buysells = np.zeros(numrows)
+    pos = 0
+    start_index = max(besta, bestb) - 1
+
+    for i in range(start_index, numrows - 1):
+        smadiff_current = smadiff[i]
+        smadiff_prev = smadiff[i - 1]
+        diff_change = smadiff_current - smadiff_prev
+
+        if diff_change > 0 and pos == 0:
+            buysells[i] = 1
+            pos = 1
+        elif diff_change < 0 and pos == 1:
+            buysells[i] = -1
+            pos = 0
+        else:
+            buysells[i] = 0
+
+    # Calculate best trades
+    besttrades = []
+    tradecount = 0
+    buy_index = None
+    current_liquidity = start_amount if compounding else start_amount
+    running_pnl = 0.0
+
+    for i in range(start_index, numrows):
+        signal = buysells[i]
+        if signal == 1:
+            tradecount += 1
+            besttrades.append({
+                'TradeNumber': tradecount,
+                'Buy/Sell': 1,
+                'DateNum': stocks.at[i, 'Date'].toordinal(),
+                'Price': stocks.at[i, stockcol],
+                'PreTaxReturn': 0.0,
+                'PreTaxCumReturn': 0.0,
+                'HoldTime': 0.0,
+                'Date': stocks.at[i, 'Date'],
+                'PreTaxLiquidity': current_liquidity,
+                'PreTax Running P/L': 0.0
+            })
+            buy_index = i
+
+        elif signal == -1 and buy_index is not None:
+            tradecount += 1
+            sell_price = stocks.at[i, stockcol]
+            buy_price = stocks.at[buy_index, stockcol]
+            pre_tax_return = (sell_price - buy_price) / buy_price
+            hold_time = (stocks.at[i, 'Date'] - stocks.at[buy_index, 'Date']).days
+
+            if compounding:
+                profit_dollars = current_liquidity * pre_tax_return
+                current_liquidity += profit_dollars
+            else:
+                profit_dollars = start_amount * pre_tax_return
+                running_pnl += profit_dollars
+
+            besttrades.append({
+                'TradeNumber': tradecount,
+                'Buy/Sell': -1,
+                'DateNum': stocks.at[i, 'Date'].toordinal(),
+                'Price': sell_price,
+                'PreTaxReturn': pre_tax_return,
+                'PreTaxCumReturn': 0.0,
+                'HoldTime': hold_time,
+                'Date': stocks.at[i, 'Date'],
+                'PreTaxLiquidity': current_liquidity if compounding else (start_amount + running_pnl),
+                'PreTax Running P/L': profit_dollars
+            })
+            buy_index = None
+
+    # Handle open position at the end
+    if pos == 1 and buy_index is not None:
+        if buysells[numrows - 1] != -1:
+            tradecount += 1
+            sell_price = stocks.at[numrows - 1, stockcol]
+            buy_price = stocks.at[buy_index, stockcol]
+            pre_tax_return = (sell_price - buy_price) / buy_price
+            hold_time = (stocks.at[numrows - 1, 'Date'] - stocks.at[buy_index, 'Date']).days
+
+            if compounding:
+                profit_dollars = current_liquidity * pre_tax_return
+                current_liquidity += profit_dollars
+            else:
+                profit_dollars = start_amount * pre_tax_return
+                running_pnl += profit_dollars
+
+            besttrades.append({
+                'TradeNumber': tradecount,
+                'Buy/Sell': -1,
+                'DateNum': stocks.at[numrows - 1, 'Date'].toordinal(),
+                'Price': sell_price,
+                'PreTaxReturn': pre_tax_return,
+                'PreTaxCumReturn': 0.0,
+                'HoldTime': hold_time,
+                'Date': stocks.at[numrows - 1, 'Date'],
+                'PreTaxLiquidity': current_liquidity if compounding else (start_amount + running_pnl),
+                'PreTax Running P/L': profit_dollars
+            })
+
+    # Calculate final metrics for best combination
+    sell_trades_final = [t for t in besttrades if t['Buy/Sell'] == -1]
+    total_sell_trades = len(sell_trades_final)
+    losingtrades = sum(1 for t in sell_trades_final if t.get('PreTaxReturn', 0) < 0)
+    winningtrades = total_sell_trades - losingtrades
+
+    losingtradepct = losingtrades / total_sell_trades if total_sell_trades else 0
+    winningtradepct = winningtrades / total_sell_trades if total_sell_trades else 0
+
+    hold_times = [t['HoldTime'] for t in sell_trades_final]
+    average_hold_time = sum(hold_times) / len(hold_times) if hold_times else 0
+
+    last_4_trades = sell_trades_final[-4:]
+    wins_last_4 = sum(1 for t in last_4_trades if t['PreTaxReturn'] > 0)
+    win_percentage_last_4_trades = (wins_last_4 / 4) if len(last_4_trades) == 4 else None
+
+    # Calculate final taxed liquidity
+    under1yearpl = 0.0
+    over1yearpl = 0.0
+    if compounding:
+        rolling_liquidity = start_amount
+        for tr in besttrades:
+            if tr['Buy/Sell'] == -1:
+                hold_time = tr['HoldTime']
+                gain_dollars = rolling_liquidity * tr['PreTaxReturn']
+                if hold_time < 365:
+                    under1yearpl += gain_dollars
+                else:
+                    over1yearpl += gain_dollars
+                rolling_liquidity += gain_dollars
+    else:
+        for tr in besttrades:
+            if tr['Buy/Sell'] == -1:
+                hold_time = tr['HoldTime']
+                gain_dollars = start_amount * tr['PreTaxReturn']
+                if hold_time < 365:
+                    under1yearpl += gain_dollars
+                else:
+                    over1yearpl += gain_dollars
+
+    if besttradecount > 0 and (under1yearpl + over1yearpl) > 0:
+        taxed_under = under1yearpl * under1yeartax if under1yearpl > 0 else under1yearpl
+        taxed_over = over1yearpl * over1yeartax if over1yearpl > 0 else over1yearpl
+        taxcumpl = taxed_under + taxed_over
+    else:
+        taxcumpl = under1yearpl + over1yearpl
+
+    bestendtaxed_liquidity = start_amount + taxcumpl
+
     # Compare final best taxed return vs. buy-and-hold taxed return
     if noalgoreturn != 0:
         betteroff = (besttaxedreturn - noalgoreturn) / abs(noalgoreturn)
@@ -336,13 +517,51 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
             betteroff = 0
 
     # Average trade percentage: consider only sells
-    sell_trades_final = [t for t in besttrades if t['Buy/Sell'] == -1]
     if sell_trades_final:
         avgtradepct = besttaxedreturn / len(sell_trades_final)
         maxdrawdown = min(t['PreTaxReturn'] for t in sell_trades_final)
     else:
         avgtradepct = 0
         maxdrawdown = 0
+
+    # Calculate parameter stability metrics
+    # Convert to numpy arrays for easier calculations
+    all_taxed_returns = np.array(all_taxed_returns)
+    all_better_off = np.array(all_better_off)
+    all_win_rates = np.array(all_win_rates)
+    all_trade_counts = np.array(all_trade_counts)
+
+    # Taxed Return stability metrics
+    taxed_return_avg = np.mean(all_taxed_returns)
+    taxed_return_std = np.std(all_taxed_returns)
+    taxed_return_max = np.max(all_taxed_returns)
+    taxed_return_min = np.min(all_taxed_returns)
+    taxed_return_max_min_diff = taxed_return_max - taxed_return_min
+    taxed_return_max_avg_diff = taxed_return_max - taxed_return_avg
+
+    # Better Off stability metrics
+    better_off_avg = np.mean(all_better_off)
+    better_off_std = np.std(all_better_off)
+    better_off_max = np.max(all_better_off)
+    better_off_min = np.min(all_better_off)
+    better_off_max_min_diff = better_off_max - better_off_min
+    better_off_max_avg_diff = better_off_max - better_off_avg
+
+    # Win Rate stability metrics
+    win_rate_avg = np.mean(all_win_rates)
+    win_rate_std = np.std(all_win_rates)
+    win_rate_max = np.max(all_win_rates)
+    win_rate_min = np.min(all_win_rates)
+    win_rate_max_min_diff = win_rate_max - win_rate_min
+    win_rate_max_avg_diff = win_rate_max - win_rate_avg
+
+    # Trade Count stability metrics
+    trade_count_avg = np.mean(all_trade_counts)
+    trade_count_std = np.std(all_trade_counts)
+    trade_count_max = np.max(all_trade_counts)
+    trade_count_min = np.min(all_trade_counts)
+    trade_count_max_min_diff = trade_count_max - trade_count_min
+    trade_count_max_avg_diff = trade_count_max - trade_count_avg
 
     # Prepare output results
     outputresults1 = {
@@ -354,7 +573,8 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         "besttradecount": besttradecount,
         "avgtradepct": avgtradepct,
         "iterations": iterations,
-        "combinations": combinations
+        "combinations": combinations,
+        "optimization_objective": optimization_objective
     }
 
     outputresults2 = {
@@ -367,6 +587,41 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         "maxdrawdown(worst trade return pct)": maxdrawdown,
         "average_hold_time": average_hold_time,
         "win_percentage_last_4_trades": win_percentage_last_4_trades
+    }
+
+    # Parameter stability metrics
+    param_stability = {
+        # Taxed Return stability
+        "taxed_return_avg": taxed_return_avg,
+        "taxed_return_std": taxed_return_std,
+        "taxed_return_max": taxed_return_max,
+        "taxed_return_min": taxed_return_min,
+        "taxed_return_max_min_diff": taxed_return_max_min_diff,
+        "taxed_return_max_avg_diff": taxed_return_max_avg_diff,
+        
+        # Better Off stability
+        "better_off_avg": better_off_avg,
+        "better_off_std": better_off_std,
+        "better_off_max": better_off_max,
+        "better_off_min": better_off_min,
+        "better_off_max_min_diff": better_off_max_min_diff,
+        "better_off_max_avg_diff": better_off_max_avg_diff,
+        
+        # Win Rate stability
+        "win_rate_avg": win_rate_avg,
+        "win_rate_std": win_rate_std,
+        "win_rate_max": win_rate_max,
+        "win_rate_min": win_rate_min,
+        "win_rate_max_min_diff": win_rate_max_min_diff,
+        "win_rate_max_avg_diff": win_rate_max_avg_diff,
+        
+        # Trade Count stability
+        "trade_count_avg": trade_count_avg,
+        "trade_count_std": trade_count_std,
+        "trade_count_max": trade_count_max,
+        "trade_count_min": trade_count_min,
+        "trade_count_max_min_diff": trade_count_max_min_diff,
+        "trade_count_max_avg_diff": trade_count_max_avg_diff
     }
 
     # Convert besttrades to DataFrame for better visualization
@@ -387,6 +642,7 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
     result = {
         "outputresults1": outputresults1,
         "outputresults2": outputresults2,
+        "param_stability": param_stability,
         "besttrades": besttrades_df.to_dict('records') if not besttrades_df.empty else []
     }
 
