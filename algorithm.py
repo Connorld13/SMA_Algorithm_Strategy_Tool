@@ -293,7 +293,7 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
             all_taxed_returns.append(taxcumreturn)
             all_trade_counts.append(tradecount_)
             all_parameters.append((a, b))
-            all_win_rates.append(win_rate)
+            all_win_rates.append(win_rate)  # Store win rate here instead of recalculating later
 
             # Increment iteration, update progress if provided
             iterations += 1
@@ -349,6 +349,154 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
 
     besta, bestb = all_parameters[best_idx]
     besttradecount = all_trade_counts[best_idx]
+
+    # SECOND PASS: Calculate parameter stability metrics only around the optimal combination
+    # Define the range around the optimal parameters (±10 SMA values)
+    stability_range = 10
+    a_stability_start = max(astart, besta - stability_range)
+    a_stability_end = min(aend, besta + stability_range)
+    b_stability_start = max(bstart, bestb - stability_range)
+    b_stability_end = min(bend, bestb + stability_range)
+
+    # Arrays to store stability analysis results
+    stability_taxed_returns = []
+    stability_better_off = []
+    stability_win_rates = []
+    stability_trade_counts = []
+
+    # Calculate total combinations for stability analysis
+    stability_combinations = (((a_stability_end - a_stability_start) // inc) + 1) * (((b_stability_end - b_stability_start) // inc) + 1)
+    stability_iterations = 0
+
+    # Loop through stability range combinations
+    for a in range(a_stability_start, a_stability_end + 1, inc):
+        # Recompute SMA1 for current 'a'
+        sma1 = stocks[stockcol].rolling(window=a, min_periods=a).mean().fillna(0).values
+
+        for b in range(b_stability_start, b_stability_end + 1, inc):
+            # Recompute SMA2 for current 'b'
+            sma2 = stocks[stockcol].rolling(window=b, min_periods=b).mean().fillna(0).values
+            smadiff = sma1 - sma2
+
+            # Initialize buy/sell signals
+            buysells = np.zeros(numrows)
+            pos = 0  # 0: not in position, 1: in position
+
+            # We start evaluating signals at the index where SMA2 first becomes valid
+            start_index = max(a, b) - 1
+
+            # Generate buy/sell signals
+            for i in range(start_index, numrows - 1):
+                smadiff_current = smadiff[i]
+                smadiff_prev = smadiff[i - 1]
+                diff_change = smadiff_current - smadiff_prev
+
+                if diff_change > 0 and pos == 0:   # indicates an upward crossover
+                    buysells[i] = 1  # Buy
+                    pos = 1
+                elif diff_change < 0 and pos == 1: # indicates a downward crossover
+                    buysells[i] = -1  # Sell
+                    pos = 0
+                else:
+                    buysells[i] = 0   # No action
+
+            # Calculate trades for stability analysis (simplified version)
+            trades_stability = []
+            buy_index = None
+
+            for i in range(start_index, numrows):
+                signal = buysells[i]
+                if signal == 1:  # Buy
+                    buy_index = i
+                elif signal == -1 and buy_index is not None:  # Sell
+                    sell_price = stocks.at[i, stockcol]
+                    buy_price = stocks.at[buy_index, stockcol]
+                    pre_tax_return = (sell_price - buy_price) / buy_price
+                    hold_time = (stocks.at[i, 'Date'] - stocks.at[buy_index, 'Date']).days
+
+                    trades_stability.append({
+                        'PreTaxReturn': pre_tax_return,
+                        'HoldTime': hold_time
+                    })
+                    buy_index = None
+
+            # Handle open position at the end
+            if pos == 1 and buy_index is not None:
+                sell_price = stocks.at[numrows - 1, stockcol]
+                buy_price = stocks.at[buy_index, stockcol]
+                pre_tax_return = (sell_price - buy_price) / buy_price
+                hold_time = (stocks.at[numrows - 1, 'Date'] - stocks.at[buy_index, 'Date']).days
+
+                trades_stability.append({
+                    'PreTaxReturn': pre_tax_return,
+                    'HoldTime': hold_time
+                })
+
+            # Calculate metrics for stability analysis
+            tradecount_stability = len(trades_stability)
+            
+            # Calculate taxed return for stability analysis
+            under1yearpl_stability = 0.0
+            over1yearpl_stability = 0.0
+
+            if compounding:
+                rolling_liquidity = start_amount
+                for tr in trades_stability:
+                    hold_time = tr['HoldTime']
+                    gain_dollars = rolling_liquidity * tr['PreTaxReturn']
+                    if hold_time < 365:
+                        under1yearpl_stability += gain_dollars
+                    else:
+                        over1yearpl_stability += gain_dollars
+                    rolling_liquidity += gain_dollars
+            else:
+                for tr in trades_stability:
+                    hold_time = tr['HoldTime']
+                    gain_dollars = start_amount * tr['PreTaxReturn']
+                    if hold_time < 365:
+                        under1yearpl_stability += gain_dollars
+                    else:
+                        over1yearpl_stability += gain_dollars
+
+            if tradecount_stability > 0 and (under1yearpl_stability + over1yearpl_stability) > 0:
+                taxed_under = under1yearpl_stability * under1yeartax if under1yearpl_stability > 0 else under1yearpl_stability
+                taxed_over = over1yearpl_stability * over1yeartax if over1yearpl_stability > 0 else over1yearpl_stability
+                taxcumpl_stability = taxed_under + taxed_over
+            else:
+                taxcumpl_stability = under1yearpl_stability + over1yearpl_stability
+
+            endtaxed_liquidity_stability = start_amount + taxcumpl_stability
+            taxcumreturn_stability = (endtaxed_liquidity_stability / start_amount) - 1
+
+            # Calculate win rate for stability analysis
+            winning_trades_stability = sum(1 for t in trades_stability if t.get('PreTaxReturn', 0) > 0)
+            win_rate_stability = winning_trades_stability / tradecount_stability if tradecount_stability > 0 else 0
+
+            # Calculate better off for stability analysis
+            if noalgoreturn != 0:
+                better_off_stability = (taxcumreturn_stability - noalgoreturn) / abs(noalgoreturn)
+            else:
+                if taxcumreturn_stability > 0:
+                    better_off_stability = np.inf
+                elif taxcumreturn_stability < 0:
+                    better_off_stability = -np.inf
+                else:
+                    better_off_stability = 0
+
+            # Store stability results
+            stability_taxed_returns.append(taxcumreturn_stability)
+            stability_better_off.append(better_off_stability)
+            stability_win_rates.append(win_rate_stability)
+            stability_trade_counts.append(tradecount_stability)
+
+            # Update progress for stability analysis
+            stability_iterations += 1
+            if progress_callback:
+                # Combine progress from both passes
+                first_pass_progress = 80  # First pass gets 80% of progress
+                stability_progress = (stability_iterations / stability_combinations) * 20  # Second pass gets 20%
+                total_progress = first_pass_progress + stability_progress
+                progress_callback(total_progress)
 
     # Recalculate best trades for the best combination
     sma1 = stocks[stockcol].rolling(window=besta, min_periods=besta).mean().fillna(0).values
@@ -524,42 +672,42 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         avgtradepct = 0
         maxdrawdown = 0
 
-    # Calculate parameter stability metrics
+    # Calculate parameter stability metrics using the stability analysis results
     # Convert to numpy arrays for easier calculations
-    all_taxed_returns = np.array(all_taxed_returns)
-    all_better_off = np.array(all_better_off)
-    all_win_rates = np.array(all_win_rates)
-    all_trade_counts = np.array(all_trade_counts)
+    stability_taxed_returns = np.array(stability_taxed_returns)
+    stability_better_off = np.array(stability_better_off)
+    stability_win_rates = np.array(stability_win_rates)
+    stability_trade_counts = np.array(stability_trade_counts)
 
     # Taxed Return stability metrics
-    taxed_return_avg = np.mean(all_taxed_returns)
-    taxed_return_std = np.std(all_taxed_returns)
-    taxed_return_max = np.max(all_taxed_returns)
-    taxed_return_min = np.min(all_taxed_returns)
+    taxed_return_avg = np.mean(stability_taxed_returns)
+    taxed_return_std = np.std(stability_taxed_returns)
+    taxed_return_max = np.max(stability_taxed_returns)
+    taxed_return_min = np.min(stability_taxed_returns)
     taxed_return_max_min_diff = taxed_return_max - taxed_return_min
     taxed_return_max_avg_diff = taxed_return_max - taxed_return_avg
 
     # Better Off stability metrics
-    better_off_avg = np.mean(all_better_off)
-    better_off_std = np.std(all_better_off)
-    better_off_max = np.max(all_better_off)
-    better_off_min = np.min(all_better_off)
+    better_off_avg = np.mean(stability_better_off)
+    better_off_std = np.std(stability_better_off)
+    better_off_max = np.max(stability_better_off)
+    better_off_min = np.min(stability_better_off)
     better_off_max_min_diff = better_off_max - better_off_min
     better_off_max_avg_diff = better_off_max - better_off_avg
 
     # Win Rate stability metrics
-    win_rate_avg = np.mean(all_win_rates)
-    win_rate_std = np.std(all_win_rates)
-    win_rate_max = np.max(all_win_rates)
-    win_rate_min = np.min(all_win_rates)
+    win_rate_avg = np.mean(stability_win_rates)
+    win_rate_std = np.std(stability_win_rates)
+    win_rate_max = np.max(stability_win_rates)
+    win_rate_min = np.min(stability_win_rates)
     win_rate_max_min_diff = win_rate_max - win_rate_min
     win_rate_max_avg_diff = win_rate_max - win_rate_avg
 
     # Trade Count stability metrics
-    trade_count_avg = np.mean(all_trade_counts)
-    trade_count_std = np.std(all_trade_counts)
-    trade_count_max = np.max(all_trade_counts)
-    trade_count_min = np.min(all_trade_counts)
+    trade_count_avg = np.mean(stability_trade_counts)
+    trade_count_std = np.std(stability_trade_counts)
+    trade_count_max = np.max(stability_trade_counts)
+    trade_count_min = np.min(stability_trade_counts)
     trade_count_max_min_diff = trade_count_max - trade_count_min
     trade_count_max_avg_diff = trade_count_max - trade_count_avg
 
@@ -574,7 +722,9 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         "avgtradepct": avgtradepct,
         "iterations": iterations,
         "combinations": combinations,
-        "optimization_objective": optimization_objective
+        "optimization_objective": optimization_objective,
+        "stability_range": stability_range,
+        "stability_combinations": stability_combinations
     }
 
     outputresults2 = {
