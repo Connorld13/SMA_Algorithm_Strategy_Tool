@@ -240,6 +240,9 @@ def on_run_now():
                 elif time_frame == "3 Years":
                     start_date_dt = end_date_dt - relativedelta(years=3)
                     num_rows = 252 * 3
+                elif time_frame == "2 Years":
+                    start_date_dt = end_date_dt - relativedelta(years=2)
+                    num_rows = 252 * 2
                 elif time_frame == "1 Year":
                     start_date_dt = end_date_dt - relativedelta(years=1)
                     num_rows = 252
