@@ -4,8 +4,10 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import time
+import cache_manager
 
-def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=True, optimization_objective="taxed_return"):
+def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=True, optimization_objective="taxed_return", 
+                  start_date=None, end_date=None, use_cache=True):
     """
     Runs the SMA trading algorithm on the provided stock data.
 
@@ -15,9 +17,12 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         progress_callback (function): Function to call with progress updates (percentage).
         compounding (bool): If True, reinvest gains after each trade; if False, do not reinvest.
         optimization_objective (str): Objective to optimize for - "taxed_return", "better_off", or "win_rate"
+        start_date (str or None): Start date for cache key generation
+        end_date (str or None): End date for cache key generation
+        use_cache (bool): Whether to use cached results if available
     
     Returns:
-        dict: A dictionary containing output results and best trades.
+        dict: A dictionary containing output results, best trades, and all combinations.
     """
     # Ensure 'Close' is the stock price column
     stockcol = 'Close'  # Adjust if necessary based on your data
@@ -77,260 +82,372 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
     all_win_rates = []
     all_trade_counts = []
     all_parameters = []  # Store (a, b) pairs
-
-    # Loop through SMA combinations
-    for a in range(astart, aend + 1, inc):
-        # Recompute SMA1 for current 'a'
-        sma1 = stocks[stockcol].rolling(window=a, min_periods=a).mean().fillna(0).values
-
-        for b in range(bstart, bend + 1, inc):
-            # Recompute SMA2 for current 'b'
-            sma2 = stocks[stockcol].rolling(window=b, min_periods=b).mean().fillna(0).values
-            smadiff = sma1 - sma2
-
-            # Initialize buy/sell signals
-            buysells = np.zeros(numrows)
-            pos = 0  # 0: not in position, 1: in position
-
-            # Depending on compounding, we handle liquidity differently
-            if compounding:
-                current_liquidity = start_amount
+    
+    # Store all combination results with detailed metrics for scoring
+    all_combinations = []
+    
+    # Get ticker for cache key
+    ticker = data['Ticker'].iloc[0] if 'Ticker' in data.columns and len(data) > 0 else "UNKNOWN"
+    
+    # Check cache if enabled
+    use_cached_combinations = False
+    if use_cache and start_date is not None and end_date is not None:
+        cached_data = cache_manager.load_backtest_cache(
+            ticker, start_date, end_date, compounding, optimization_objective, start_amount
+        )
+        if cached_data is not None and 'all_combinations' in cached_data:
+            print(f"Loading cached combinations for {ticker} ({len(cached_data['all_combinations'])} combinations)")
+            all_combinations = cached_data['all_combinations']
+            use_cached_combinations = True
+            
+            # Extract data from cached combinations for compatibility
+            all_taxed_returns = [c['taxed_return'] for c in all_combinations]
+            all_better_off = [c.get('better_off', 0) for c in all_combinations]
+            all_win_rates = [c['win_rate'] for c in all_combinations]
+            all_trade_counts = [c['trade_count'] for c in all_combinations]
+            all_parameters = [(c['sma_a'], c['sma_b']) for c in all_combinations]
+            
+            # Get noalgoreturn from cache or calculate it
+            if 'noalgoreturn' in cached_data:
+                noalgoreturn = cached_data['noalgoreturn']
             else:
-                # If not compounding, we'll keep current_liquidity the same
-                # but track profit separately in running_pnl
-                current_liquidity = start_amount
-                running_pnl = 0.0
-
-            # We start evaluating signals at the index where SMA2 first becomes valid
-            start_index = max(a, b) - 1
-
-            # Generate buy/sell signals
-            for i in range(start_index, numrows - 1):
-                smadiff_current = smadiff[i]
-                smadiff_prev = smadiff[i - 1]
-                diff_change = smadiff_current - smadiff_prev
-
-                if diff_change > 0 and pos == 0:   # indicates an upward crossover
-                    buysells[i] = 1  # Buy
-                    pos = 1
-                elif diff_change < 0 and pos == 1: # indicates a downward crossover
-                    buysells[i] = -1  # Sell
-                    pos = 0
+                # Calculate noalgoreturn if not in cache
+                total_days = (stocks.at[numrows - 1, 'Date'] - stocks.at[0, 'Date']).days if numrows > 1 else 0
+                price_return = (
+                    (stocks.at[numrows - 1, stockcol] - stocks.at[0, stockcol]) / stocks.at[0, stockcol]
+                ) if numrows > 1 else 0
+                if total_days < 365:
+                    noalgoreturn = price_return * under1yeartax if price_return > 0 else price_return
                 else:
-                    buysells[i] = 0   # No action
+                    noalgoreturn = price_return * over1yeartax if price_return > 0 else price_return
 
-            # Calculate and list trades
-            trades = []  # List to store trades as dictionaries
-            tradecount = 0
-            buy_index = None
+    # Loop through SMA combinations (skip if using cached data)
+    if not use_cached_combinations:
+        for a in range(astart, aend + 1, inc):
+            # Recompute SMA1 for current 'a'
+            sma1 = stocks[stockcol].rolling(window=a, min_periods=a).mean().fillna(0).values
 
-            for i in range(start_index, numrows):
-                signal = buysells[i]
-                if signal == 1:  # Buy
-                    tradecount += 1
-                    trades.append({
-                        'TradeNumber': tradecount,
-                        'Buy/Sell': 1,
-                        'DateNum': stocks.at[i, 'Date'].toordinal(),
-                        'Price': stocks.at[i, stockcol],
-                        'PreTaxReturn': 0.0,         # Will be updated on sell
-                        'PreTaxCumReturn': 0.0,      # Will be updated
-                        'HoldTime': 0.0,            # Will be updated on sell
-                        'Date': stocks.at[i, 'Date'],
-                        'PreTaxLiquidity': current_liquidity,
-                        'PreTax Running P/L': 0.0    # Will be updated
-                    })
-                    buy_index = i
+            for b in range(bstart, bend + 1, inc):
+                # Recompute SMA2 for current 'b'
+                sma2 = stocks[stockcol].rolling(window=b, min_periods=b).mean().fillna(0).values
+                smadiff = sma1 - sma2
 
-                elif signal == -1 and buy_index is not None:  # Sell
-                    tradecount += 1
-                    sell_price = stocks.at[i, stockcol]
-                    buy_price = stocks.at[buy_index, stockcol]
-                    pre_tax_return = (sell_price - buy_price) / buy_price
-                    hold_time = (stocks.at[i, 'Date'] - stocks.at[buy_index, 'Date']).days
+                # Initialize buy/sell signals
+                buysells = np.zeros(numrows)
+                pos = 0  # 0: not in position, 1: in position
 
-                    if compounding:
-                        # Increase current liquidity (reinvest gains)
-                        profit_dollars = current_liquidity * pre_tax_return
-                        current_liquidity += profit_dollars
+                # Depending on compounding, we handle liquidity differently
+                if compounding:
+                    current_liquidity = start_amount
+                else:
+                    # If not compounding, we'll keep current_liquidity the same
+                    # but track profit separately in running_pnl
+                    current_liquidity = start_amount
+                    running_pnl = 0.0
+
+                # We start evaluating signals at the index where SMA2 first becomes valid
+                start_index = max(a, b) - 1
+
+                # Generate buy/sell signals
+                for i in range(start_index, numrows - 1):
+                    smadiff_current = smadiff[i]
+                    smadiff_prev = smadiff[i - 1]
+                    diff_change = smadiff_current - smadiff_prev
+
+                    if diff_change > 0 and pos == 0:   # indicates an upward crossover
+                        buysells[i] = 1  # Buy
+                        pos = 1
+                    elif diff_change < 0 and pos == 1: # indicates a downward crossover
+                        buysells[i] = -1  # Sell
+                        pos = 0
                     else:
-                        # Non-compounding: Gains do not change the liquidity for the next trade,
-                        # we just track profits separately
-                        profit_dollars = start_amount * pre_tax_return
-                        running_pnl += profit_dollars
+                        buysells[i] = 0   # No action
 
-                    trades.append({
-                        'TradeNumber': tradecount,
-                        'Buy/Sell': -1,
-                        'DateNum': stocks.at[i, 'Date'].toordinal(),
-                        'Price': sell_price,
-                        'PreTaxReturn': pre_tax_return,
-                        'PreTaxCumReturn': 0.0,  # Will be updated
-                        'HoldTime': hold_time,
-                        'Date': stocks.at[i, 'Date'],
-                        'PreTaxLiquidity': current_liquidity
-                            if compounding else (start_amount + running_pnl),
-                        'PreTax Running P/L': profit_dollars
-                    })
-                    buy_index = None  # Reset after selling
+                # Calculate and list trades
+                trades = []  # List to store trades as dictionaries
+                tradecount = 0
+                buy_index = None
 
-            # Handle open position at the end by selling at the last price if not already sold
-            if pos == 1 and buy_index is not None:
-                if buysells[numrows - 1] != -1:
-                    tradecount += 1
-                    sell_price = stocks.at[numrows - 1, stockcol]
-                    buy_price = stocks.at[buy_index, stockcol]
-                    pre_tax_return = (sell_price - buy_price) / buy_price
-                    hold_time = (stocks.at[numrows - 1, 'Date'] - stocks.at[buy_index, 'Date']).days
+                for i in range(start_index, numrows):
+                    signal = buysells[i]
+                    if signal == 1:  # Buy
+                        tradecount += 1
+                        trades.append({
+                            'TradeNumber': tradecount,
+                            'Buy/Sell': 1,
+                            'DateNum': stocks.at[i, 'Date'].toordinal(),
+                            'Price': stocks.at[i, stockcol],
+                            'PreTaxReturn': 0.0,         # Will be updated on sell
+                            'PreTaxCumReturn': 0.0,      # Will be updated
+                            'HoldTime': 0.0,            # Will be updated on sell
+                            'Date': stocks.at[i, 'Date'],
+                            'PreTaxLiquidity': current_liquidity,
+                            'PreTax Running P/L': 0.0    # Will be updated
+                        })
+                        buy_index = i
 
-                    if compounding:
-                        profit_dollars = current_liquidity * pre_tax_return
-                        current_liquidity += profit_dollars
-                    else:
-                        profit_dollars = start_amount * pre_tax_return
-                        running_pnl += profit_dollars
+                    elif signal == -1 and buy_index is not None:  # Sell
+                        tradecount += 1
+                        sell_price = stocks.at[i, stockcol]
+                        buy_price = stocks.at[buy_index, stockcol]
+                        pre_tax_return = (sell_price - buy_price) / buy_price
+                        hold_time = (stocks.at[i, 'Date'] - stocks.at[buy_index, 'Date']).days
 
-                    trades.append({
-                        'TradeNumber': tradecount,
-                        'Buy/Sell': -1,
-                        'DateNum': stocks.at[numrows - 1, 'Date'].toordinal(),
-                        'Price': sell_price,
-                        'PreTaxReturn': pre_tax_return,
-                        'PreTaxCumReturn': 0.0,
-                        'HoldTime': hold_time,
-                        'Date': stocks.at[numrows - 1, 'Date'],
-                        'PreTaxLiquidity': current_liquidity
-                            if compounding else (start_amount + running_pnl),
-                        'PreTax Running P/L': profit_dollars
-                    })
-
-            # Convert trades list to a DataFrame
-            trades_df = pd.DataFrame(trades)
-
-            # Initialize cumulative variables
-            pre_tax_pnl = 0.0
-            pre_tax_cum_return = 0.0
-
-            # Update trades with cumulative returns and P/L
-            for idx_trade, row_trade in trades_df.iterrows():
-                if row_trade['Buy/Sell'] == 1:
-                    # Buy trade doesn't realize P/L yet
-                    trades_df.at[idx_trade, 'PreTax Running P/L'] = pre_tax_pnl
-                elif row_trade['Buy/Sell'] == -1:
-                    # Sell trade: realize immediate P/L
-                    trade_return = row_trade['PreTaxReturn']
-                    # For the sake of clarity, if compounding:
-                    # the final used liquidity was updated, so let's approximate
-                    # the P/L from that trade. But in your original code, 
-                    # you used `current_liquidity * pre_tax_return`.
-                    # We can keep pre_tax_pnl as a sum of realized gains.
-                    if compounding:
-                        # Just assume the dictionary has the correct P/L in 'PreTax Running P/L'
-                        pre_tax_pnl += row_trade['PreTax Running P/L']
-                    else:
-                        pre_tax_pnl += row_trade['PreTax Running P/L']
-
-                    pre_tax_cum_return = (pre_tax_cum_return + 1) * (trade_return + 1) - 1
-                    trades_df.at[idx_trade, 'PreTaxCumReturn'] = pre_tax_cum_return
-                    trades_df.at[idx_trade, 'PreTax Running P/L'] = pre_tax_pnl
-
-            # Convert back to list if needed
-            if not trades_df.empty:
-                trades = trades_df.to_dict('records')
-            else:
-                trades = []
-
-            # Compute under1yearpl and over1yearpl
-            # We use a simplified approach: if compounding is True, then at each sell, 
-            # the "liquidity" changes. If not, each trade is from the original start_amount.
-            under1yearpl = 0.0
-            over1yearpl = 0.0
-
-            if compounding:
-                # We'll "simulate" the rolling liquidity for short vs. long-term splits
-                rolling_liquidity = start_amount
-                for tr in trades:
-                    if tr['Buy/Sell'] == -1:
-                        hold_time = tr['HoldTime']
-                        # Gains from that trade in dollars:
-                        gain_dollars = rolling_liquidity * tr['PreTaxReturn']
-                        if hold_time < 365:
-                            under1yearpl += gain_dollars
+                        if compounding:
+                            # Increase current liquidity (reinvest gains)
+                            profit_dollars = current_liquidity * pre_tax_return
+                            current_liquidity += profit_dollars
                         else:
-                            over1yearpl += gain_dollars
-                        rolling_liquidity += gain_dollars
-            else:
-                # Non-compounding: each trade is effectively from the same `start_amount`
-                for tr in trades:
-                    if tr['Buy/Sell'] == -1:
-                        hold_time = tr['HoldTime']
-                        gain_dollars = start_amount * tr['PreTaxReturn']
-                        if hold_time < 365:
-                            under1yearpl += gain_dollars
+                            # Non-compounding: Gains do not change the liquidity for the next trade,
+                            # we just track profits separately
+                            profit_dollars = start_amount * pre_tax_return
+                            running_pnl += profit_dollars
+
+                        trades.append({
+                            'TradeNumber': tradecount,
+                            'Buy/Sell': -1,
+                            'DateNum': stocks.at[i, 'Date'].toordinal(),
+                            'Price': sell_price,
+                            'PreTaxReturn': pre_tax_return,
+                            'PreTaxCumReturn': 0.0,  # Will be updated
+                            'HoldTime': hold_time,
+                            'Date': stocks.at[i, 'Date'],
+                            'PreTaxLiquidity': current_liquidity
+                                if compounding else (start_amount + running_pnl),
+                            'PreTax Running P/L': profit_dollars
+                        })
+                        buy_index = None  # Reset after selling
+
+                # Handle open position at the end by selling at the last price if not already sold
+                if pos == 1 and buy_index is not None:
+                    if buysells[numrows - 1] != -1:
+                        tradecount += 1
+                        sell_price = stocks.at[numrows - 1, stockcol]
+                        buy_price = stocks.at[buy_index, stockcol]
+                        pre_tax_return = (sell_price - buy_price) / buy_price
+                        hold_time = (stocks.at[numrows - 1, 'Date'] - stocks.at[buy_index, 'Date']).days
+
+                        if compounding:
+                            profit_dollars = current_liquidity * pre_tax_return
+                            current_liquidity += profit_dollars
                         else:
-                            over1yearpl += gain_dollars
+                            profit_dollars = start_amount * pre_tax_return
+                            running_pnl += profit_dollars
 
-            # Calculate taxed return
-            tradecount_ = len([t for t in trades if t['Buy/Sell'] == -1])
-            if tradecount_ > 0 and (under1yearpl + over1yearpl) > 0:
-                taxed_under = under1yearpl * under1yeartax if under1yearpl > 0 else under1yearpl
-                taxed_over = over1yearpl * over1yeartax if over1yearpl > 0 else over1yearpl
-                taxcumpl = taxed_under + taxed_over
+                        trades.append({
+                            'TradeNumber': tradecount,
+                            'Buy/Sell': -1,
+                            'DateNum': stocks.at[numrows - 1, 'Date'].toordinal(),
+                            'Price': sell_price,
+                            'PreTaxReturn': pre_tax_return,
+                            'PreTaxCumReturn': 0.0,
+                            'HoldTime': hold_time,
+                            'Date': stocks.at[numrows - 1, 'Date'],
+                            'PreTaxLiquidity': current_liquidity
+                                if compounding else (start_amount + running_pnl),
+                            'PreTax Running P/L': profit_dollars
+                        })
+
+                # Convert trades list to a DataFrame
+                trades_df = pd.DataFrame(trades)
+
+                # Initialize cumulative variables
+                pre_tax_pnl = 0.0
+                pre_tax_cum_return = 0.0
+
+                # Update trades with cumulative returns and P/L
+                for idx_trade, row_trade in trades_df.iterrows():
+                    if row_trade['Buy/Sell'] == 1:
+                        # Buy trade doesn't realize P/L yet
+                        trades_df.at[idx_trade, 'PreTax Running P/L'] = pre_tax_pnl
+                    elif row_trade['Buy/Sell'] == -1:
+                        # Sell trade: realize immediate P/L
+                        trade_return = row_trade['PreTaxReturn']
+                        # For the sake of clarity, if compounding:
+                        # the final used liquidity was updated, so let's approximate
+                        # the P/L from that trade. But in your original code, 
+                        # you used `current_liquidity * pre_tax_return`.
+                        # We can keep pre_tax_pnl as a sum of realized gains.
+                        if compounding:
+                            # Just assume the dictionary has the correct P/L in 'PreTax Running P/L'
+                            pre_tax_pnl += row_trade['PreTax Running P/L']
+                        else:
+                            pre_tax_pnl += row_trade['PreTax Running P/L']
+
+                        pre_tax_cum_return = (pre_tax_cum_return + 1) * (trade_return + 1) - 1
+                        trades_df.at[idx_trade, 'PreTaxCumReturn'] = pre_tax_cum_return
+                        trades_df.at[idx_trade, 'PreTax Running P/L'] = pre_tax_pnl
+
+                # Convert back to list if needed
+                if not trades_df.empty:
+                    trades = trades_df.to_dict('records')
+                else:
+                    trades = []
+
+                # Compute under1yearpl and over1yearpl
+                # We use a simplified approach: if compounding is True, then at each sell, 
+                # the "liquidity" changes. If not, each trade is from the original start_amount.
+                under1yearpl = 0.0
+                over1yearpl = 0.0
+
+                if compounding:
+                    # We'll "simulate" the rolling liquidity for short vs. long-term splits
+                    rolling_liquidity = start_amount
+                    for tr in trades:
+                        if tr['Buy/Sell'] == -1:
+                            hold_time = tr['HoldTime']
+                            # Gains from that trade in dollars:
+                            gain_dollars = rolling_liquidity * tr['PreTaxReturn']
+                            if hold_time < 365:
+                                under1yearpl += gain_dollars
+                            else:
+                                over1yearpl += gain_dollars
+                            rolling_liquidity += gain_dollars
+                else:
+                    # Non-compounding: each trade is effectively from the same `start_amount`
+                    for tr in trades:
+                        if tr['Buy/Sell'] == -1:
+                            hold_time = tr['HoldTime']
+                            gain_dollars = start_amount * tr['PreTaxReturn']
+                            if hold_time < 365:
+                                under1yearpl += gain_dollars
+                            else:
+                                over1yearpl += gain_dollars
+
+                # Calculate taxed return
+                tradecount_ = len([t for t in trades if t['Buy/Sell'] == -1])
+                if tradecount_ > 0 and (under1yearpl + over1yearpl) > 0:
+                    taxed_under = under1yearpl * under1yeartax if under1yearpl > 0 else under1yearpl
+                    taxed_over = over1yearpl * over1yeartax if over1yearpl > 0 else over1yearpl
+                    taxcumpl = taxed_under + taxed_over
+                else:
+                    taxcumpl = under1yearpl + over1yearpl
+
+                # Compute final taxed liquidity and taxed return
+                endtaxed_liquidity = start_amount + taxcumpl
+                taxcumreturn = (endtaxed_liquidity / start_amount) - 1
+
+                # Calculate win rate for this combination
+                sell_trades = [t for t in trades if t['Buy/Sell'] == -1]
+                total_sell_trades = len(sell_trades)
+                winning_trades = sum(1 for t in sell_trades if t.get('PreTaxReturn', 0) > 0)
+                win_rate = winning_trades / total_sell_trades if total_sell_trades > 0 else 0
+
+                # Calculate additional metrics for scoring
+                losing_trades = total_sell_trades - winning_trades
+                losing_trade_pct = losing_trades / total_sell_trades if total_sell_trades > 0 else 0
+                
+                # Calculate max drawdown (worst trade return)
+                max_drawdown = min([t.get('PreTaxReturn', 0) for t in sell_trades]) if sell_trades else 0
+                
+                # Calculate average hold time
+                hold_times = [t.get('HoldTime', 0) for t in sell_trades]
+                avg_hold_time = sum(hold_times) / len(hold_times) if hold_times else 0
+                
+                # Calculate average trade return
+                avg_trade_return = sum([t.get('PreTaxReturn', 0) for t in sell_trades]) / len(sell_trades) if sell_trades else 0
+                
+                # Calculate return volatility (std dev of trade returns)
+                trade_returns = [t.get('PreTaxReturn', 0) for t in sell_trades]
+                return_std = np.std(trade_returns) if len(trade_returns) > 1 else 0
+                
+                # Calculate win percentage of last 4 trades
+                last_4_trades = sell_trades[-4:] if len(sell_trades) >= 4 else sell_trades
+                wins_last_4 = sum(1 for t in last_4_trades if t.get('PreTaxReturn', 0) > 0)
+                win_pct_last_4 = (wins_last_4 / len(last_4_trades)) if len(last_4_trades) > 0 else None
+
+                # Store results for parameter stability analysis
+                all_taxed_returns.append(taxcumreturn)
+                all_trade_counts.append(tradecount_)
+                all_parameters.append((a, b))
+                all_win_rates.append(win_rate)  # Store win rate here instead of recalculating later
+                
+                # Store detailed combination results for scoring
+                # Convert Date objects to strings for JSON serialization in cache
+                trades_for_cache = []
+                for trade in trades:
+                    trade_copy = trade.copy()
+                    if 'Date' in trade_copy and hasattr(trade_copy['Date'], 'strftime'):
+                        trade_copy['Date'] = trade_copy['Date'].strftime('%Y-%m-%d')
+                    trades_for_cache.append(trade_copy)
+                
+                combination_result = {
+                    'sma_a': a,
+                    'sma_b': b,
+                    'taxed_return': taxcumreturn,
+                    'win_rate': win_rate,
+                    'trade_count': tradecount_,
+                    'winning_trades': winning_trades,
+                    'losing_trades': losing_trades,
+                    'losing_trade_pct': losing_trade_pct,
+                    'max_drawdown': max_drawdown,
+                    'avg_hold_time': avg_hold_time,
+                    'avg_trade_return': avg_trade_return,
+                    'return_std': return_std,
+                    'win_pct_last_4': win_pct_last_4,
+                    'end_taxed_liquidity': endtaxed_liquidity,
+                    'under1yearpl': under1yearpl,
+                    'over1yearpl': over1yearpl,
+                    'trades': trades_for_cache  # Store trades for this combination
+                }
+                all_combinations.append(combination_result)
+
+                # Increment iteration, update progress if provided
+                iterations += 1
+                if progress_callback:
+                    progress_percentage = (iterations / combinations) * 100
+                    progress_percentage = min(progress_percentage, 100)  # ensure it does not exceed 100
+                    progress_callback(progress_percentage)
+
+    # After exploring all (a, b) combos, calculate the "no algorithm" taxed return (if not cached)
+    if not use_cached_combinations:
+        total_days = (stocks.at[numrows - 1, 'Date'] - stocks.at[0, 'Date']).days if numrows > 1 else 0
+        price_return = (
+            (stocks.at[numrows - 1, stockcol] - stocks.at[0, stockcol]) / stocks.at[0, stockcol]
+        ) if numrows > 1 else 0
+
+        if total_days < 365:
+            if price_return > 0:
+                noalgoreturn = price_return * under1yeartax
             else:
-                taxcumpl = under1yearpl + over1yearpl
-
-            # Compute final taxed liquidity and taxed return
-            endtaxed_liquidity = start_amount + taxcumpl
-            taxcumreturn = (endtaxed_liquidity / start_amount) - 1
-
-            # Calculate win rate for this combination
-            sell_trades = [t for t in trades if t['Buy/Sell'] == -1]
-            total_sell_trades = len(sell_trades)
-            winning_trades = sum(1 for t in sell_trades if t.get('PreTaxReturn', 0) > 0)
-            win_rate = winning_trades / total_sell_trades if total_sell_trades > 0 else 0
-
-            # Store results for parameter stability analysis
-            all_taxed_returns.append(taxcumreturn)
-            all_trade_counts.append(tradecount_)
-            all_parameters.append((a, b))
-            all_win_rates.append(win_rate)  # Store win rate here instead of recalculating later
-
-            # Increment iteration, update progress if provided
-            iterations += 1
-            if progress_callback:
-                progress_percentage = (iterations / combinations) * 100
-                progress_percentage = min(progress_percentage, 100)  # ensure it does not exceed 100
-                progress_callback(progress_percentage)
-
-    # After exploring all (a, b) combos, calculate the "no algorithm" taxed return
-    total_days = (stocks.at[numrows - 1, 'Date'] - stocks.at[0, 'Date']).days if numrows > 1 else 0
-    price_return = (
-        (stocks.at[numrows - 1, stockcol] - stocks.at[0, stockcol]) / stocks.at[0, stockcol]
-    ) if numrows > 1 else 0
-
-    if total_days < 365:
-        if price_return > 0:
-            noalgoreturn = price_return * under1yeartax
+                noalgoreturn = price_return
         else:
-            noalgoreturn = price_return
+            if price_return > 0:
+                noalgoreturn = price_return * over1yeartax
+            else:
+                noalgoreturn = price_return
+
+        # Calculate better off for all combinations and update all_combinations
+        for i, tax_return in enumerate(all_taxed_returns):
+            if noalgoreturn != 0:
+                better_off = (tax_return - noalgoreturn) / abs(noalgoreturn)
+            else:
+                if tax_return > 0:
+                    better_off = np.inf
+                elif tax_return < 0:
+                    better_off = -np.inf
+                else:
+                    better_off = 0
+            all_better_off.append(better_off)
+            # Update the combination result with better_off
+            all_combinations[i]['better_off'] = better_off
     else:
-        if price_return > 0:
-            noalgoreturn = price_return * over1yeartax
-        else:
-            noalgoreturn = price_return
-
-    # Calculate better off for all combinations
-    for i, tax_return in enumerate(all_taxed_returns):
-        if noalgoreturn != 0:
-            better_off = (tax_return - noalgoreturn) / abs(noalgoreturn)
-        else:
-            if tax_return > 0:
-                better_off = np.inf
-            elif tax_return < 0:
-                better_off = -np.inf
-            else:
-                better_off = 0
-        all_better_off.append(better_off)
+        # Extract better_off from cached combinations if not present
+        if not all_better_off or len(all_better_off) == 0:
+            for i, c in enumerate(all_combinations):
+                if 'better_off' not in c or c['better_off'] is None:
+                    tax_return = c['taxed_return']
+                    if noalgoreturn != 0:
+                        better_off = (tax_return - noalgoreturn) / abs(noalgoreturn)
+                    else:
+                        if tax_return > 0:
+                            better_off = np.inf
+                        elif tax_return < 0:
+                            better_off = -np.inf
+                        else:
+                            better_off = 0
+                    all_combinations[i]['better_off'] = better_off
+            all_better_off = [c.get('better_off', 0) for c in all_combinations]
 
     # Find best combination based on optimization objective
     if optimization_objective == "taxed_return":
@@ -363,7 +480,7 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
     stability_better_off = []
     stability_win_rates = []
     stability_trade_counts = []
-
+    
     # Calculate total combinations for stability analysis
     stability_combinations = (((a_stability_end - a_stability_start) // inc) + 1) * (((b_stability_end - b_stability_start) // inc) + 1)
     stability_iterations = 0
@@ -793,7 +910,29 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
         "outputresults1": outputresults1,
         "outputresults2": outputresults2,
         "param_stability": param_stability,
-        "besttrades": besttrades_df.to_dict('records') if not besttrades_df.empty else []
+        "besttrades": besttrades_df.to_dict('records') if not besttrades_df.empty else [],
+        "all_combinations": all_combinations,  # Store all combinations for rescoring
+        "best_combination_idx": best_idx,  # Index of best combination
+        "noalgoreturn": noalgoreturn
     }
+    
+    # Save to cache if enabled and we have date information
+    # If start_date is None, use actual start date from data
+    cache_start_date = start_date
+    if use_cache and end_date is not None:
+        if cache_start_date is None and numrows > 0:
+            # Get actual start date from data
+            actual_start = stocks['Date'].min()
+            if hasattr(actual_start, 'strftime'):
+                cache_start_date = actual_start.strftime("%Y-%m-%d")
+            elif isinstance(actual_start, str):
+                cache_start_date = actual_start
+        
+        if cache_start_date is not None:
+            cache_manager.save_backtest_cache(
+                ticker, cache_start_date, end_date, compounding, optimization_objective,
+                start_amount, all_combinations, best_idx, noalgoreturn,
+                besttrades=besttrades_df.to_dict('records') if not besttrades_df.empty else []
+            )
 
     return result
