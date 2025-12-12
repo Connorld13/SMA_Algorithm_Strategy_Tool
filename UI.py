@@ -500,26 +500,9 @@ def on_run_now():
 
             # Fetch data
             set_status("Fetching data...")
-            # For walk-forward, we need more historical data
-            if enable_walk_forward and walk_forward_config:
-                # Calculate how far back we need to go
-                backtest_period = relativedelta(
-                    years=walk_forward_config['backtest_period_years'],
-                    months=walk_forward_config['backtest_period_months']
-                )
-                walk_forward_period = relativedelta(
-                    years=walk_forward_config['walk_forward_period_years'],
-                    months=walk_forward_config['walk_forward_period_months']
-                )
-                # Estimate segments needed
-                estimated_segments = 5  # Conservative estimate
-                total_period = backtest_period + (walk_forward_period * estimated_segments)
-                # Fetch from further back
-                wf_start_date = end_date_dt - total_period
-                wf_start_date_str = wf_start_date.strftime("%Y-%m-%d")
-                data = fetch_and_prepare_data(selected_stocks, wf_start_date_str, end_date_str, None)
-            else:
-                data = fetch_and_prepare_data(selected_stocks, start_date_str, end_date_str, num_rows)
+            # For walk-forward, use the same time period as specified by user
+            # The walk-forward will split it into training and test periods within that range
+            data = fetch_and_prepare_data(selected_stocks, start_date_str, end_date_str, num_rows)
             update_progress(20)
 
             if cancel_requested:
@@ -561,29 +544,55 @@ def on_run_now():
                     algorithm_results[ticker] = {"Error": "No data fetched for this ticker."}
                     progress_callback(100)
                 else:
-                    if enable_walk_forward and walk_forward_config:
-                        # For batch runs, use batch walk forward (best scored combo only)
-                        # For single stock, use regular walk forward
-                        import walk_forward
-                        if is_batch_run:
-                            # First run regular algorithm to get best combo
-                            training_result = algorithm.run_algorithm(
-                                ticker_data,
-                                start_amount=10000,
-                                progress_callback=lambda p: progress_callback(p * 0.5),  # Use first half of progress
-                                compounding=is_compounding,
-                                optimization_objective=optimization_objective,
-                                start_date=start_date_str,
-                                end_date=end_date_str,
-                                use_cache=True
-                            )
-                            
-                            if "Error" not in training_result:
-                                # Then run batch walk forward on best combo
-                                result = walk_forward.run_batch_walk_forward_analysis(
+                    # Filter ticker_data to respect the user's specified time period
+                    if start_date_str is not None:
+                        if not pd.api.types.is_datetime64_any_dtype(ticker_data['Date']):
+                            ticker_data['Date'] = pd.to_datetime(ticker_data['Date'])
+                        start_date_dt_filter = datetime.strptime(start_date_str, "%Y-%m-%d")
+                        ticker_data = ticker_data[ticker_data['Date'] >= start_date_dt_filter].copy()
+                    
+                    try:
+                        if enable_walk_forward and walk_forward_config:
+                            # For batch runs, use batch walk forward (best scored combo only)
+                            # For single stock, use regular walk forward
+                            import walk_forward
+                            if is_batch_run:
+                                # First run regular algorithm to get best combo
+                                training_result = algorithm.run_algorithm(
                                     ticker_data,
                                     start_amount=10000,
-                                    progress_callback=lambda p: progress_callback(50 + p * 0.5),  # Use second half
+                                    progress_callback=lambda p: progress_callback(p * 0.5),  # Use first half of progress
+                                    compounding=is_compounding,
+                                    optimization_objective=optimization_objective,
+                                    start_date=start_date_str,
+                                    end_date=end_date_str,
+                                    use_cache=True
+                                )
+                                
+                                if "Error" not in training_result:
+                                    # Then run batch walk forward on best combo
+                                    result = walk_forward.run_batch_walk_forward_analysis(
+                                        ticker_data,
+                                        start_amount=10000,
+                                        progress_callback=lambda p: progress_callback(50 + p * 0.5),  # Use second half
+                                        compounding=is_compounding,
+                                        optimization_objective=optimization_objective,
+                                        end_date=end_date_str,
+                                        backtest_period_years=walk_forward_config['backtest_period_years'],
+                                        backtest_period_months=walk_forward_config['backtest_period_months'],
+                                        walk_forward_period_years=walk_forward_config['walk_forward_period_years'],
+                                        walk_forward_period_months=walk_forward_config['walk_forward_period_months'],
+                                        scoring_config=scoring_config,
+                                        training_result=training_result
+                                    )
+                                else:
+                                    result = training_result
+                            else:
+                                # Single stock: use regular walk forward
+                                result = walk_forward.run_walk_forward_analysis(
+                                    ticker_data,
+                                    start_amount=10000,
+                                    progress_callback=progress_callback,
                                     compounding=is_compounding,
                                     optimization_objective=optimization_objective,
                                     end_date=end_date_str,
@@ -591,98 +600,114 @@ def on_run_now():
                                     backtest_period_months=walk_forward_config['backtest_period_months'],
                                     walk_forward_period_years=walk_forward_config['walk_forward_period_years'],
                                     walk_forward_period_months=walk_forward_config['walk_forward_period_months'],
-                                    scoring_config=scoring_config,
-                                    training_result=training_result
+                                    rebalance_years=walk_forward_config['rebalance_years'],
+                                    rebalance_months=walk_forward_config['rebalance_months'],
+                                    rebalance_none=walk_forward_config['rebalance_none'],
+                                    scoring_config=scoring_config
                                 )
-                            else:
-                                result = training_result
+                            # Save walk-forward results to cache
+                            if result and "Error" not in result and end_date_str:
+                                import cache_manager
+                                from pathlib import Path
+                                import pickle
+                                try:
+                                    # Get actual start date from data for cache naming (prevents "FullRange" files)
+                                    walk_forward_start_date = start_date_str
+                                    if walk_forward_start_date is None and ticker_data is not None and not ticker_data.empty and 'Date' in ticker_data.columns:
+                                        actual_start = ticker_data['Date'].min()
+                                        if hasattr(actual_start, 'strftime'):
+                                            walk_forward_start_date = actual_start.strftime("%Y-%m-%d")
+                                        elif isinstance(actual_start, str):
+                                            walk_forward_start_date = actual_start
+                                    
+                                    # For batch mode, use segment trades if training/walk-forward trades not available
+                                    training_trades = result.get('training_trades', [])
+                                    walk_forward_trades = result.get('walk_forward_trades', [])
+                                    
+                                    # If batch mode and using old segment structure, convert it
+                                    if not training_trades and not walk_forward_trades and result.get('batch_mode', False):
+                                        # Batch mode uses segment structure - we'll keep it for compatibility
+                                        walk_forward_segment_trades = result.get('walk_forward_segment_trades', [])
+                                    else:
+                                        walk_forward_segment_trades = []
+                                    
+                                    # Save walk-forward cache with all walk-forward data included
+                                    cache_saved = cache_manager.save_backtest_cache(
+                                        ticker, walk_forward_start_date, end_date_str, is_compounding, optimization_objective,
+                                        10000, result.get('all_combinations', []), 
+                                        result.get('best_combination_idx', 0), 
+                                        result.get('noalgoreturn', 0),
+                                        besttrades=training_trades if training_trades else [],  # Training period trades
+                                        walk_forward_mode=True,
+                                        segments=result.get('segments', 0),
+                                        training_score=result.get('training_score', 0.0),
+                                        walk_forward_score=result.get('walk_forward_score', 0.0),
+                                        combined_score=result.get('combined_score', 0.0),
+                                        training_metrics=result.get('training_metrics', {}),
+                                        walk_forward_metrics=result.get('walk_forward_metrics', {}),
+                                        walk_forward_segment_trades=walk_forward_segment_trades,  # For batch mode compatibility
+                                        training_trades=training_trades,  # Store training trades
+                                        walk_forward_trades=walk_forward_trades,  # Store walk-forward trades
+                                        batch_dir=batch_dir  # Save to batch directory if batch run
+                                    )
+                                    if not cache_saved:
+                                        print(f"Warning: Failed to save walk-forward cache for {ticker}")
+                                except Exception as e:
+                                    print(f"Error saving walk-forward cache for {ticker}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
                         else:
-                            # Single stock: use regular walk forward
-                            result = walk_forward.run_walk_forward_analysis(
+                            # Run regular algorithm
+                            result = algorithm.run_algorithm(
                                 ticker_data,
                                 start_amount=10000,
                                 progress_callback=progress_callback,
                                 compounding=is_compounding,
                                 optimization_objective=optimization_objective,
+                                start_date=start_date_str,
                                 end_date=end_date_str,
-                                backtest_period_years=walk_forward_config['backtest_period_years'],
-                                backtest_period_months=walk_forward_config['backtest_period_months'],
-                                walk_forward_period_years=walk_forward_config['walk_forward_period_years'],
-                                walk_forward_period_months=walk_forward_config['walk_forward_period_months'],
-                                rebalance_years=walk_forward_config['rebalance_years'],
-                                rebalance_months=walk_forward_config['rebalance_months'],
-                                rebalance_none=walk_forward_config['rebalance_none'],
-                                scoring_config=scoring_config
+                                use_cache=True
                             )
-                        # Save walk-forward results to cache
-                        if result and "Error" not in result and end_date_str:
+                        
+                        algorithm_results[ticker] = result
+                        
+                        # Save regular algorithm results to batch directory if batch run
+                        if is_batch_run and result and "Error" not in result and end_date_str:
                             import cache_manager
-                            from pathlib import Path
-                            import pickle
-                            # Get actual start date from data for cache naming (prevents "FullRange" files)
-                            walk_forward_start_date = start_date_str
-                            if walk_forward_start_date is None and ticker_data is not None and not ticker_data.empty and 'Date' in ticker_data.columns:
-                                actual_start = ticker_data['Date'].min()
-                                if hasattr(actual_start, 'strftime'):
-                                    walk_forward_start_date = actual_start.strftime("%Y-%m-%d")
-                                elif isinstance(actual_start, str):
-                                    walk_forward_start_date = actual_start
-                            
-                            # Save walk-forward cache with all walk-forward data included
-                            cache_manager.save_backtest_cache(
-                                ticker, walk_forward_start_date, end_date_str, is_compounding, optimization_objective,
-                                10000, result.get('all_combinations', []), 
-                                result.get('best_combination_idx', 0), 
-                                result.get('noalgoreturn', 0),
-                                besttrades=[],  # Walk-forward doesn't have individual trades
-                                walk_forward_mode=True,
-                                segments=result.get('segments', 0),
-                                training_score=result.get('training_score', 0.0),
-                                walk_forward_score=result.get('walk_forward_score', 0.0),
-                                combined_score=result.get('combined_score', 0.0),
-                                training_metrics=result.get('training_metrics', {}),
-                                walk_forward_metrics=result.get('walk_forward_metrics', {}),
-                                walk_forward_segment_trades=result.get('walk_forward_segment_trades', []),  # Store trades per segment
-                                batch_dir=batch_dir  # Save to batch directory if batch run
-                            )
-                    else:
-                        # Run regular algorithm
-                        result = algorithm.run_algorithm(
-                            ticker_data,
-                            start_amount=10000,
-                            progress_callback=progress_callback,
-                            compounding=is_compounding,
-                            optimization_objective=optimization_objective,
-                            start_date=start_date_str,
-                            end_date=end_date_str,
-                            use_cache=True
-                        )
-                    
-                    algorithm_results[ticker] = result
-                    
-                    # Save regular algorithm results to batch directory if batch run
-                    if is_batch_run and result and "Error" not in result and end_date_str:
-                        import cache_manager
-                        cache_manager.save_backtest_cache(
-                            ticker, start_date_str, end_date_str, is_compounding, optimization_objective,
-                            10000, result.get('all_combinations', []), 
-                            result.get('best_combination_idx', 0), 
-                            result.get('noalgoreturn', 0),
-                            besttrades=result.get('besttrades', []),
-                            walk_forward_mode=False,
-                            batch_dir=batch_dir
-                        )
-                    
-                    # Debug: Print walk-forward info if enabled
-                    if enable_walk_forward and walk_forward_config:
-                        print(f"Walk-forward result for {ticker}:")
-                        print(f"  Walk-forward mode: {result.get('walk_forward_mode', False)}")
-                        print(f"  Segments: {result.get('segments', 0)}")
-                        print(f"  Training score: {result.get('training_score', 0)}")
-                        print(f"  Walk-forward score: {result.get('walk_forward_score', 0)}")
-                        print(f"  Combined score: {result.get('combined_score', 0)}")
-                    
-                    progress_callback(100)
+                            try:
+                                cache_saved = cache_manager.save_backtest_cache(
+                                    ticker, start_date_str, end_date_str, is_compounding, optimization_objective,
+                                    10000, result.get('all_combinations', []), 
+                                    result.get('best_combination_idx', 0), 
+                                    result.get('noalgoreturn', 0),
+                                    besttrades=result.get('besttrades', []),
+                                    walk_forward_mode=False,
+                                    batch_dir=batch_dir
+                                )
+                                if not cache_saved:
+                                    print(f"Warning: Failed to save cache for {ticker}")
+                            except Exception as e:
+                                print(f"Error saving cache for {ticker}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        
+                        # Debug: Print walk-forward info if enabled
+                        if enable_walk_forward and walk_forward_config:
+                            print(f"Walk-forward result for {ticker}:")
+                            print(f"  Walk-forward mode: {result.get('walk_forward_mode', False)}")
+                            print(f"  Segments: {result.get('segments', 0)}")
+                            print(f"  Training score: {result.get('training_score', 0)}")
+                            print(f"  Walk-forward score: {result.get('walk_forward_score', 0)}")
+                            print(f"  Combined score: {result.get('combined_score', 0)}")
+                        
+                        progress_callback(100)
+                    except Exception as e:
+                        error_msg = f"Error processing {ticker}: {str(e)}"
+                        print(error_msg)
+                        import traceback
+                        traceback.print_exc()
+                        algorithm_results[ticker] = {"Error": error_msg}
+                        progress_callback(100)
 
                 # Check for cancellation after each stock
                 if cancel_requested:
@@ -874,20 +899,117 @@ def view_trade_table():
             ticker_var.set(ticker)
             ticker_combobox['values'] = [ticker]
             
-            # Check if this is walk-forward - display trades by segment
+            # Check if this is walk-forward - display training and walk-forward trades separately
             if cache_data.get("walk_forward_mode", False):
-                walk_forward_segment_trades = cache_data.get('walk_forward_segment_trades', [])
-                if not walk_forward_segment_trades:
-                    status_label.config(text="Walk-Forward Analysis: No segment trades available.")
-                    for item in tree_trade.get_children():
-                        tree_trade.delete(item)
-                    tree_trade["columns"] = ()
+                # Try new simple structure first
+                training_trades = cache_data.get('training_trades', [])
+                walk_forward_trades = cache_data.get('walk_forward_trades', [])
+                
+                # Display new simple structure with visual separation
+                if training_trades or walk_forward_trades:
+                    all_trades = []
+                    
+                    # Add training period trades with Period marker
+                    if training_trades:
+                        for trade in training_trades:
+                            # Format dates
+                            if isinstance(trade.get('Date'), datetime):
+                                trade_date = trade['Date'].strftime('%Y-%m-%d')
+                            else:
+                                trade_date = str(trade.get('Date', ''))
+                            
+                            if isinstance(trade.get('BuyDate'), datetime):
+                                buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                            else:
+                                buy_date = str(trade.get('BuyDate', ''))
+                            
+                            if isinstance(trade.get('SellDate'), datetime):
+                                sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                            else:
+                                sell_date = str(trade.get('SellDate', ''))
+                            
+                            all_trades.append({
+                                'Period': 'TRAINING',
+                                'Trade Date': trade_date,
+                                'BuyDate': buy_date,
+                                'SellDate': sell_date,
+                                'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                                'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'HoldTime': trade.get('HoldTime', 0),
+                                'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                                'SMA_A': trade.get('SMA_A', ''),
+                                'SMA_B': trade.get('SMA_B', '')
+                            })
+                    
+                    # Add separator row between training and walk-forward
+                    if training_trades and walk_forward_trades:
+                        all_trades.append({
+                            'Period': '────────────────────────────────────',
+                            'Trade Date': '', 'BuyDate': '', 'SellDate': '',
+                            'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '',
+                            'HoldTime': '', 'GainDollars': '', 'SMA_A': '', 'SMA_B': ''
+                        })
+                    
+                    # Add walk-forward test period trades
+                    if walk_forward_trades:
+                        for trade in walk_forward_trades:
+                            # Format dates
+                            if isinstance(trade.get('Date'), datetime):
+                                trade_date = trade['Date'].strftime('%Y-%m-%d')
+                            else:
+                                trade_date = str(trade.get('Date', ''))
+                            
+                            if isinstance(trade.get('BuyDate'), datetime):
+                                buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                            else:
+                                buy_date = str(trade.get('BuyDate', ''))
+                            
+                            if isinstance(trade.get('SellDate'), datetime):
+                                sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                            else:
+                                sell_date = str(trade.get('SellDate', ''))
+                            
+                            all_trades.append({
+                                'Period': 'WALK-FORWARD TEST',
+                                'Trade Date': trade_date,
+                                'BuyDate': buy_date,
+                                'SellDate': sell_date,
+                                'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                                'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'HoldTime': trade.get('HoldTime', 0),
+                                'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                                'SMA_A': trade.get('SMA_A', ''),
+                                'SMA_B': trade.get('SMA_B', '')
+                            })
+                    
+                    if all_trades:
+                        populate_trade_table_from_data(all_trades)
+                        train_count = len(training_trades) if training_trades else 0
+                        test_count = len(walk_forward_trades) if walk_forward_trades else 0
+                        status_label.config(text=f"✓ Walk-Forward Analysis for {ticker}: {train_count} TRAINING trades | {test_count} WALK-FORWARD TEST trades")
+                    else:
+                        status_label.config(text="Walk-Forward Analysis: No trades available.")
+                        for item in tree_trade.get_children():
+                            tree_trade.delete(item)
+                        tree_trade["columns"] = ()
                     return
                 
-                # Display walk-forward trades separated by segment
-                all_trades = []
-                for seg_data in walk_forward_segment_trades:
-                    segment_num = seg_data.get('segment', 0)
+                # Fallback to old segment structure for backward compatibility
+                if not training_trades and not walk_forward_trades:
+                    walk_forward_segment_trades = cache_data.get('walk_forward_segment_trades', [])
+                    if not walk_forward_segment_trades:
+                        status_label.config(text="Walk-Forward Analysis: No trades available.")
+                        for item in tree_trade.get_children():
+                            tree_trade.delete(item)
+                        tree_trade["columns"] = ()
+                        return
+                    
+                    # Convert old segment structure to new format
+                    all_trades = []
+                    for seg_data in walk_forward_segment_trades:
+                        segment_num = seg_data.get('segment', 0)
                     seg_trades = seg_data.get('trades', [])
                     test_start = seg_data.get('test_start', '')
                     test_end = seg_data.get('test_end', '')
@@ -1456,7 +1578,9 @@ def load_batch_from_folder():
                     "combined_score": cache_data.get('combined_score', 0.0),
                     "training_metrics": cache_data.get('training_metrics', {}),
                     "walk_forward_metrics": cache_data.get('walk_forward_metrics', {}),
-                    "walk_forward_segment_trades": cache_data.get('walk_forward_segment_trades', [])  # Include segment trades
+                    "walk_forward_segment_trades": cache_data.get('walk_forward_segment_trades', []),  # Legacy support
+                    "training_trades": cache_data.get('training_trades', []),  # Training period trades
+                    "walk_forward_trades": cache_data.get('walk_forward_trades', [])  # Walk-forward test period trades
                 }
                 
                 loaded_results[ticker] = result
@@ -2283,120 +2407,434 @@ def view_batch_results():
         else:
             ttk.Label(stability_tab, text="No parameter stability data available").pack(pady=20)
         
-        # Trades tab - show walk-forward trades if available
-        trades_tab = ttk.Frame(detail_notebook)
-        detail_notebook.add(trades_tab, text="Trades")
+        # Helper function to create a trades tab with tree view
+        def create_trades_tab(tab_name):
+            """Create a trades tab with tree view and return the components."""
+            tab = ttk.Frame(detail_notebook)
+            detail_notebook.add(tab, text=tab_name)
+            
+            explanation_label = ttk.Label(tab, text="", foreground="blue", font=("Arial", 9), wraplength=800)
+            explanation_label.pack(pady=5, padx=5)
+            
+            tree_frame = ttk.Frame(tab)
+            tree_frame.pack(fill="both", expand=True, padx=10, pady=10)
+            
+            scroll_y = ttk.Scrollbar(tree_frame, orient="vertical")
+            scroll_y.pack(side="right", fill="y")
+            scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal")
+            scroll_x.pack(side="bottom", fill="x")
+            
+            tree = ttk.Treeview(tree_frame, yscrollcommand=scroll_y.set,
+                              xscrollcommand=scroll_x.set)
+            scroll_y.config(command=tree.yview)
+            scroll_x.config(command=tree.xview)
+            tree.pack(fill="both", expand=True)
+            
+            status_label = ttk.Label(tab, text="")
+            status_label.pack(pady=5)
+            
+            return tab, tree, status_label, explanation_label
         
-        # Explanation label for walk-forward
-        trades_explanation_detail = ttk.Label(trades_tab, text="", foreground="blue", font=("Arial", 9), wraplength=800)
-        trades_explanation_detail.pack(pady=5, padx=5)
+        # Create separate tabs for training and walk-forward trades if in walk-forward mode
+        if has_wf and result.get("walk_forward_mode", False):
+            # Training Trades tab
+            training_tab, training_tree, training_status, training_explanation = create_trades_tab("Training Trades")
+            
+            # Walk-Forward Test Trades tab
+            wf_tab, wf_tree, wf_status, wf_explanation = create_trades_tab("Walk-Forward Test Trades")
+            
+            # For backward compatibility, also create a combined "Trades" tab
+            trades_tab, trades_detail_tree, trades_status_label, trades_explanation_detail = create_trades_tab("Trades (Combined)")
+        else:
+            # Regular backtest - just one Trades tab
+            trades_tab, trades_detail_tree, trades_status_label, trades_explanation_detail = create_trades_tab("Trades")
+            training_tab = training_tree = training_status = training_explanation = None
+            wf_tab = wf_tree = wf_status = wf_explanation = None
         
-        trades_tree_frame = ttk.Frame(trades_tab)
-        trades_tree_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        trades_scroll_y = ttk.Scrollbar(trades_tree_frame, orient="vertical")
-        trades_scroll_y.pack(side="right", fill="y")
-        trades_scroll_x = ttk.Scrollbar(trades_tree_frame, orient="horizontal")
-        trades_scroll_x.pack(side="bottom", fill="x")
-        
-        trades_detail_tree = ttk.Treeview(trades_tree_frame, yscrollcommand=trades_scroll_y.set,
-                                          xscrollcommand=trades_scroll_x.set)
-        trades_scroll_y.config(command=trades_detail_tree.yview)
-        trades_scroll_x.config(command=trades_detail_tree.xview)
-        trades_detail_tree.pack(fill="both", expand=True)
-        
-        trades_status_label = ttk.Label(trades_tab, text="")
-        trades_status_label.pack(pady=5)
+        # Helper function to convert besttrades format (buy/sell pairs) to expected format
+        def convert_besttrades_to_trades(besttrades_list):
+            """Convert besttrades format (separate buy/sell entries) to complete trade format."""
+            if not besttrades_list:
+                return []
+            
+            # Handle case where it might be a single dict or other format
+            if not isinstance(besttrades_list, list):
+                return []
+            
+            # Check if already in the expected format (has BuyDate/SellDate)
+            if len(besttrades_list) > 0 and isinstance(besttrades_list[0], dict):
+                first_trade = besttrades_list[0]
+                if 'BuyDate' in first_trade or ('BuyPrice' in first_trade and 'SellPrice' in first_trade):
+                    # Already in correct format
+                    return besttrades_list
+                # Also check for alternative field names
+                if 'Buy/Sell' not in first_trade:
+                    # Might already be in correct format but with different field names
+                    return besttrades_list
+            
+            # Convert from buy/sell pair format
+            converted_trades = []
+            buy_trades = {}
+            
+            for trade in besttrades_list:
+                if not isinstance(trade, dict):
+                    continue
+                    
+                buy_sell = trade.get('Buy/Sell', 0)
+                trade_num = trade.get('TradeNumber', 0)
+                
+                if buy_sell == 1:  # Buy trade
+                    buy_trades[trade_num] = {
+                        'Date': trade.get('Date'),
+                        'Price': trade.get('Price', 0)
+                    }
+                elif buy_sell == -1:  # Sell trade
+                    if trade_num in buy_trades:
+                        buy_info = buy_trades[trade_num]
+                        # Get gain dollars - try different possible field names
+                        gain_dollars = trade.get('PreTax Running P/L', 0)
+                        if gain_dollars == 0 and 'GainDollars' in trade:
+                            gain_dollars = trade.get('GainDollars', 0)
+                        
+                        converted_trades.append({
+                            'Date': trade.get('Date'),  # Use sell date as trade date
+                            'BuyDate': buy_info.get('Date'),
+                            'SellDate': trade.get('Date'),
+                            'BuyPrice': buy_info.get('Price', 0),
+                            'SellPrice': trade.get('Price', 0),
+                            'PreTaxReturn': trade.get('PreTaxReturn', 0),
+                            'HoldTime': trade.get('HoldTime', 0),
+                            'GainDollars': gain_dollars,
+                            'SMA_A': trade.get('SMA_A', ''),
+                            'SMA_B': trade.get('SMA_B', '')
+                        })
+                        del buy_trades[trade_num]
+            
+            return converted_trades
         
         # Populate trades
         if has_wf and result.get("walk_forward_mode", False):
-            walk_forward_segment_trades = result.get('walk_forward_segment_trades', [])
-            if walk_forward_segment_trades:
-                # Show explanation
-                explanation_text = (
-                    "WALK-FORWARD ANALYSIS EXPLANATION:\n"
-                    "• Each segment has a TRAINING period (to find best parameters) and a TEST period (to test those parameters)\n"
-                    "• ALL trades shown below are from the WALK-FORWARD (TEST) periods only\n"
-                    "• Training period trades are NOT shown (they're only used for optimization)\n"
-                    "• The 'Walk-Forward Test Period' column shows when these trades occurred"
-                )
-                trades_explanation_detail.config(text=explanation_text)
-                
-                all_trades = []
-                for seg_data in walk_forward_segment_trades:
-                    segment_num = seg_data.get('segment', 0)
-                    seg_trades = seg_data.get('trades', [])
-                    test_start = seg_data.get('test_start', '')
-                    test_end = seg_data.get('test_end', '')
-                    train_start = seg_data.get('train_start', '')
-                    train_end = seg_data.get('train_end', '')
+            # Try new simple structure first
+            training_trades = result.get('training_trades', [])
+            walk_forward_trades = result.get('walk_forward_trades', [])
+            
+            # Convert training_trades if they're in besttrades format (buy/sell pairs)
+            if training_trades and isinstance(training_trades, list) and len(training_trades) > 0:
+                # Check if first trade is in besttrades format (has 'Buy/Sell' key)
+                if isinstance(training_trades[0], dict) and 'Buy/Sell' in training_trades[0]:
+                    training_trades = convert_besttrades_to_trades(training_trades)
+            
+            # Fallback: if training_trades is empty or None, try to get from besttrades
+            # In walk-forward mode, besttrades contains the training period trades
+            if not training_trades or (isinstance(training_trades, list) and len(training_trades) == 0):
+                if result.get('besttrades'):
+                    besttrades_raw = result.get('besttrades', [])
+                    if besttrades_raw and len(besttrades_raw) > 0:
+                        # Check if already in correct format
+                        if isinstance(besttrades_raw[0], dict):
+                            if 'BuyDate' in besttrades_raw[0] or 'BuyPrice' in besttrades_raw[0]:
+                                # Already in correct format
+                                training_trades = besttrades_raw
+                            elif 'Buy/Sell' in besttrades_raw[0]:
+                                # Need conversion from buy/sell pairs
+                                converted = convert_besttrades_to_trades(besttrades_raw)
+                                if converted and len(converted) > 0:
+                                    training_trades = converted
+                                else:
+                                    training_trades = besttrades_raw
+                            else:
+                                # Unknown format, try to use as-is
+                                training_trades = besttrades_raw
+                        else:
+                            training_trades = besttrades_raw
+            
+            # Check if new structure exists (even if empty lists)
+            # Consider it new structure if we have training_trades or walk_forward_trades (even if empty initially)
+            # or if we have besttrades that we can use
+            has_training = (training_trades and len(training_trades) > 0)
+            has_walk_forward = (walk_forward_trades and len(walk_forward_trades) > 0)
+            has_besttrades = result.get('besttrades') and len(result.get('besttrades', [])) > 0
+            has_new_structure = has_training or has_walk_forward or ('training_trades' in result or 'walk_forward_trades' in result) or has_besttrades
+            has_old_structure = 'walk_forward_segment_trades' in result and result.get('walk_forward_segment_trades', [])
+            
+            # Use old segment structure only if new structure doesn't exist and old structure does
+            # But prioritize new structure if we have any trades
+            # IMPORTANT: Skip old structure if we have new structure to ensure both training and walk-forward show
+            # Also skip if we're using separate tabs (walk-forward mode)
+            if not has_new_structure and has_old_structure and not (result.get('walk_forward_mode') and training_tree):
+                walk_forward_segment_trades = result.get('walk_forward_segment_trades', [])
+                if walk_forward_segment_trades:
+                    # Show explanation
+                    explanation_text = (
+                        "WALK-FORWARD ANALYSIS EXPLANATION:\n"
+                        "• Each segment has a TRAINING period (to find best parameters) and a TEST period (to test those parameters)\n"
+                        "• ALL trades shown below are from the WALK-FORWARD (TEST) periods only\n"
+                        "• Training period trades are NOT shown (they're only used for optimization)\n"
+                        "• The 'Walk-Forward Test Period' column shows when these trades occurred"
+                    )
+                    trades_explanation_detail.config(text=explanation_text)
                     
-                    # Format dates
-                    if isinstance(test_start, datetime):
-                        test_period = f"{test_start.strftime('%Y-%m-%d')} to {test_end.strftime('%Y-%m-%d')}"
+                    all_trades = []
+                    for seg_data in walk_forward_segment_trades:
+                        segment_num = seg_data.get('segment', 0)
+                        seg_trades = seg_data.get('trades', [])
+                        test_start = seg_data.get('test_start', '')
+                        test_end = seg_data.get('test_end', '')
+                        train_start = seg_data.get('train_start', '')
+                        train_end = seg_data.get('train_end', '')
+                        
+                        # Format dates
+                        if isinstance(test_start, datetime):
+                            test_period = f"{test_start.strftime('%Y-%m-%d')} to {test_end.strftime('%Y-%m-%d')}"
+                        else:
+                            test_period = f"{test_start} to {test_end}"
+                        
+                        if isinstance(train_start, datetime):
+                            train_period = f"{train_start.strftime('%Y-%m-%d')} to {train_end.strftime('%Y-%m-%d')}"
+                        else:
+                            train_period = f"{train_start} to {train_end}"
+                        
+                        if seg_trades:
+                            for trade in seg_trades:
+                                # Format dates
+                                if isinstance(trade.get('Date'), datetime):
+                                    trade_date = trade['Date'].strftime('%Y-%m-%d')
+                                else:
+                                    trade_date = str(trade.get('Date', ''))
+                                
+                                if isinstance(trade.get('BuyDate'), datetime):
+                                    buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                                else:
+                                    buy_date = str(trade.get('BuyDate', ''))
+                                
+                                if isinstance(trade.get('SellDate'), datetime):
+                                    sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                                else:
+                                    sell_date = str(trade.get('SellDate', ''))
+                                
+                                all_trades.append({
+                                    'Segment': f"Segment {segment_num}",
+                                    'Training Period': train_period,
+                                    'Walk-Forward Test Period': test_period,
+                                    'Trade Date': trade_date,
+                                    'BuyDate': buy_date,
+                                    'SellDate': sell_date,
+                                    'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                                    'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                                    'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                    'HoldTime': trade.get('HoldTime', 0),
+                                    'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                                    'SMA_A': trade.get('SMA_A', ''),
+                                    'SMA_B': trade.get('SMA_B', '')
+                                })
+                    
+                    if all_trades:
+                        columns = ['Segment', 'Training Period', 'Walk-Forward Test Period', 'Trade Date', 'BuyDate', 'SellDate', 
+                                  'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 'GainDollars', 'SMA_A', 'SMA_B']
+                        trades_detail_tree["columns"] = columns
+                        for col in columns:
+                            trades_detail_tree.heading(col, text=col)
+                            trades_detail_tree.column(col, anchor="center", width=100)
+                        
+                        for trade in all_trades:
+                            values = [str(trade.get(col, '')) for col in columns]
+                            trades_detail_tree.insert("", "end", values=values)
+                        
+                        total_trades = len(all_trades)
+                        segments_count = len(walk_forward_segment_trades)
+                        trades_status_label.config(text=f"✓ Showing {total_trades} WALK-FORWARD (TEST) trades across {segments_count} segments")
                     else:
-                        test_period = f"{test_start} to {test_end}"
-                    
-                    if isinstance(train_start, datetime):
-                        train_period = f"{train_start.strftime('%Y-%m-%d')} to {train_end.strftime('%Y-%m-%d')}"
-                    else:
-                        train_period = f"{train_start} to {train_end}"
-                    
-                    if seg_trades:
-                        for trade in seg_trades:
-                            # Format dates
-                            if isinstance(trade.get('Date'), datetime):
-                                trade_date = trade['Date'].strftime('%Y-%m-%d')
-                            else:
-                                trade_date = str(trade.get('Date', ''))
-                            
-                            if isinstance(trade.get('BuyDate'), datetime):
-                                buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
-                            else:
-                                buy_date = str(trade.get('BuyDate', ''))
-                            
-                            if isinstance(trade.get('SellDate'), datetime):
-                                sell_date = trade['SellDate'].strftime('%Y-%m-%d')
-                            else:
-                                sell_date = str(trade.get('SellDate', ''))
-                            
-                            all_trades.append({
-                                'Segment': f"Segment {segment_num}",
-                                'Training Period': train_period,
-                                'Walk-Forward Test Period': test_period,
-                                'Trade Date': trade_date,
-                                'BuyDate': buy_date,
-                                'SellDate': sell_date,
-                                'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
-                                'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
-                                'HoldTime': trade.get('HoldTime', 0),
-                                'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
-                                'SMA_A': trade.get('SMA_A', ''),
-                                'SMA_B': trade.get('SMA_B', '')
-                            })
-                
-                if all_trades:
-                    columns = ['Segment', 'Training Period', 'Walk-Forward Test Period', 'Trade Date', 'BuyDate', 'SellDate', 
-                              'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 'GainDollars', 'SMA_A', 'SMA_B']
-                    trades_detail_tree["columns"] = columns
-                    for col in columns:
-                        trades_detail_tree.heading(col, text=col)
-                        trades_detail_tree.column(col, anchor="center", width=100)
-                    
-                    for trade in all_trades:
-                        values = [str(trade.get(col, '')) for col in columns]
-                        trades_detail_tree.insert("", "end", values=values)
-                    
-                    total_trades = len(all_trades)
-                    segments_count = len(walk_forward_segment_trades)
-                    trades_status_label.config(text=f"✓ Showing {total_trades} WALK-FORWARD (TEST) trades across {segments_count} segments")
+                        trades_explanation_detail.config(text="")
+                        trades_status_label.config(text="Walk-Forward Analysis: No trades found in segments.")
                 else:
                     trades_explanation_detail.config(text="")
-                    trades_status_label.config(text="Walk-Forward Analysis: No trades found in segments.")
-            else:
-                trades_explanation_detail.config(text="")
-                trades_status_label.config(text="Walk-Forward Analysis: No segment trades available.")
+                    trades_status_label.config(text="Walk-Forward Analysis: No segment trades available.")
+            
+            # Helper function to populate a tree with trades
+            def populate_trades_tree(tree, trades_list, status_label, explanation_label, period_name):
+                """Populate a tree view with trades."""
+                # Clear the tree
+                for item in tree.get_children():
+                    tree.delete(item)
+                
+                if not trades_list or len(trades_list) == 0:
+                    status_label.config(text=f"No {period_name} trades available.")
+                    explanation_label.config(text="")
+                    return
+                
+                # Format trades for display
+                formatted_trades = []
+                for trade in trades_list:
+                    # Format dates
+                    if isinstance(trade.get('Date'), datetime):
+                        trade_date = trade['Date'].strftime('%Y-%m-%d')
+                    else:
+                        trade_date = str(trade.get('Date', ''))
+                    
+                    if isinstance(trade.get('BuyDate'), datetime):
+                        buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                    else:
+                        buy_date = str(trade.get('BuyDate', ''))
+                    
+                    if isinstance(trade.get('SellDate'), datetime):
+                        sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                    else:
+                        sell_date = str(trade.get('SellDate', ''))
+                    
+                    formatted_trades.append({
+                        'Trade Date': trade_date,
+                        'BuyDate': buy_date,
+                        'SellDate': sell_date,
+                        'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                        'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                        'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                        'HoldTime': trade.get('HoldTime', 0),
+                        'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                        'SMA_A': trade.get('SMA_A', ''),
+                        'SMA_B': trade.get('SMA_B', '')
+                    })
+                
+                # Set up columns
+                columns = ['Trade Date', 'BuyDate', 'SellDate', 
+                          'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
+                          'GainDollars', 'SMA_A', 'SMA_B']
+                tree["columns"] = columns
+                for col in columns:
+                    tree.heading(col, text=col)
+                    tree.column(col, anchor="center", width=100)
+                
+                # Insert trades
+                for trade in formatted_trades:
+                    values = [str(trade.get(col, '')) for col in columns]
+                    tree.insert("", "end", values=values)
+                
+                status_label.config(text=f"✓ Showing {len(formatted_trades)} {period_name} trades")
+                explanation_label.config(text="")
+            
+            # Handle walk-forward mode with separate tabs
+            if result.get('walk_forward_mode') and training_tree and wf_tree:
+                # Ensure we have the trades - re-check and convert if needed
+                # Check training_trades
+                if not training_trades or (isinstance(training_trades, list) and len(training_trades) == 0):
+                    # Try to get from besttrades (which contains training trades in walk-forward mode)
+                    if result.get('besttrades'):
+                        besttrades_raw = result.get('besttrades', [])
+                        if besttrades_raw and len(besttrades_raw) > 0:
+                            # Check if already in correct format
+                            if isinstance(besttrades_raw[0], dict):
+                                if 'BuyDate' in besttrades_raw[0] or 'BuyPrice' in besttrades_raw[0]:
+                                    # Already in correct format
+                                    training_trades = besttrades_raw
+                                elif 'Buy/Sell' in besttrades_raw[0]:
+                                    # Need conversion
+                                    converted = convert_besttrades_to_trades(besttrades_raw)
+                                    if converted and len(converted) > 0:
+                                        training_trades = converted
+                                    else:
+                                        training_trades = besttrades_raw
+                                else:
+                                    training_trades = besttrades_raw
+                            else:
+                                training_trades = besttrades_raw
+                
+                # Also check if training_trades needs conversion
+                if training_trades and isinstance(training_trades, list) and len(training_trades) > 0:
+                    if isinstance(training_trades[0], dict) and 'Buy/Sell' in training_trades[0]:
+                        converted = convert_besttrades_to_trades(training_trades)
+                        if converted and len(converted) > 0:
+                            training_trades = converted
+                
+                # Populate training trades tab
+                populate_trades_tree(training_tree, training_trades, training_status, training_explanation, "TRAINING")
+                
+                # Populate walk-forward test trades tab
+                populate_trades_tree(wf_tree, walk_forward_trades, wf_status, wf_explanation, "WALK-FORWARD TEST")
+                
+                # Also populate combined tab for backward compatibility
+                all_trades = []
+                if training_trades and len(training_trades) > 0:
+                    for trade in training_trades:
+                        if isinstance(trade.get('Date'), datetime):
+                            trade_date = trade['Date'].strftime('%Y-%m-%d')
+                        else:
+                            trade_date = str(trade.get('Date', ''))
+                        if isinstance(trade.get('BuyDate'), datetime):
+                            buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                        else:
+                            buy_date = str(trade.get('BuyDate', ''))
+                        if isinstance(trade.get('SellDate'), datetime):
+                            sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                        else:
+                            sell_date = str(trade.get('SellDate', ''))
+                        all_trades.append({
+                            'Period': 'Training',
+                            'Trade Date': trade_date,
+                            'BuyDate': buy_date,
+                            'SellDate': sell_date,
+                            'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                            'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                            'HoldTime': trade.get('HoldTime', 0),
+                            'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                            'SMA_A': trade.get('SMA_A', ''),
+                            'SMA_B': trade.get('SMA_B', '')
+                        })
+                
+                if (training_trades and len(training_trades) > 0) and (walk_forward_trades and len(walk_forward_trades) > 0):
+                    all_trades.append({
+                        'Period': '────────────────────────────────────',
+                        'Trade Date': '', 'BuyDate': '', 'SellDate': '',
+                        'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '',
+                        'HoldTime': '', 'GainDollars': '', 'SMA_A': '', 'SMA_B': ''
+                    })
+                
+                if walk_forward_trades and len(walk_forward_trades) > 0:
+                    for trade in walk_forward_trades:
+                        if isinstance(trade.get('Date'), datetime):
+                            trade_date = trade['Date'].strftime('%Y-%m-%d')
+                        else:
+                            trade_date = str(trade.get('Date', ''))
+                        if isinstance(trade.get('BuyDate'), datetime):
+                            buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                        else:
+                            buy_date = str(trade.get('BuyDate', ''))
+                        if isinstance(trade.get('SellDate'), datetime):
+                            sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                        else:
+                            sell_date = str(trade.get('SellDate', ''))
+                        all_trades.append({
+                            'Period': 'Walk-Forward Test',
+                            'Trade Date': trade_date,
+                            'BuyDate': buy_date,
+                            'SellDate': sell_date,
+                            'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                            'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                            'HoldTime': trade.get('HoldTime', 0),
+                            'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                            'SMA_A': trade.get('SMA_A', ''),
+                            'SMA_B': trade.get('SMA_B', '')
+                        })
+                
+                columns = ['Period', 'Trade Date', 'BuyDate', 'SellDate', 
+                          'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
+                          'GainDollars', 'SMA_A', 'SMA_B']
+                trades_detail_tree["columns"] = columns
+                for col in columns:
+                    trades_detail_tree.heading(col, text=col)
+                    trades_detail_tree.column(col, anchor="center", width=100)
+                
+                if all_trades:
+                    for trade in all_trades:
+                        values = [str(trade.get(col, '')) for col in columns]
+                        item = trades_detail_tree.insert("", "end", values=values)
+                        if '──' in str(trade.get('Period', '')):
+                            trades_detail_tree.set(item, 'Period', '────────────────────────────────────')
+                    train_count = len(training_trades) if training_trades else 0
+                    test_count = len(walk_forward_trades) if walk_forward_trades else 0
+                    trades_status_label.config(text=f"✓ Showing {train_count} TRAINING trades | {test_count} WALK-FORWARD TEST trades")
+                else:
+                    trades_status_label.config(text="No trades available for this walk-forward analysis.")
         else:
             # Regular backtest - show besttrades if available
             best_trades = result.get("besttrades", [])
@@ -3191,20 +3629,144 @@ def view_cached_backtests():
             all_combinations = current_cache_data.get('all_combinations', [])
             is_best = combo == all_combinations[best_idx] if best_idx < len(all_combinations) else False
             
-            # Check if this is walk-forward - display trades by segment
+            # Check if this is walk-forward - display training and walk-forward trades separately
             if current_cache_data.get("walk_forward_mode", False):
+                # Try new simple structure first
+                training_trades = current_cache_data.get('training_trades', [])
+                walk_forward_trades = current_cache_data.get('walk_forward_trades', [])
+                
+                # Only show trades for best combination
+                if not is_best:
+                    trades_explanation.config(text="")
+                    trades_status.config(text="Trades are only available for the best-scored combination.")
+                    return
+                
+                # Show explanation for new simple structure
+                if training_trades or walk_forward_trades:
+                    explanation_text = (
+                        "WALK-FORWARD ANALYSIS:\n"
+                        "• TRAINING PERIOD: Used to find optimal SMA parameters\n"
+                        "• WALK-FORWARD TEST PERIOD: Tests those parameters on unseen data\n"
+                        "• Both periods are shown below, separated visually"
+                    )
+                    trades_explanation.config(text=explanation_text)
+                    
+                    all_trades = []
+                    
+                    # Add training period trades
+                    if training_trades:
+                        for trade in training_trades:
+                            # Format dates
+                            if isinstance(trade.get('Date'), datetime):
+                                trade_date = trade['Date'].strftime('%Y-%m-%d')
+                            else:
+                                trade_date = str(trade.get('Date', ''))
+                            
+                            if isinstance(trade.get('BuyDate'), datetime):
+                                buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                            else:
+                                buy_date = str(trade.get('BuyDate', ''))
+                            
+                            if isinstance(trade.get('SellDate'), datetime):
+                                sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                            else:
+                                sell_date = str(trade.get('SellDate', ''))
+                            
+                            all_trades.append({
+                                'Period': 'TRAINING',
+                                'Trade Date': trade_date,
+                                'BuyDate': buy_date,
+                                'SellDate': sell_date,
+                                'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                                'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'HoldTime': trade.get('HoldTime', 0),
+                                'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                                'SMA_A': trade.get('SMA_A', ''),
+                                'SMA_B': trade.get('SMA_B', '')
+                            })
+                    
+                    # Add separator
+                    if training_trades and walk_forward_trades:
+                        all_trades.append({
+                            'Period': '────────────────────────────────────',
+                            'Trade Date': '', 'BuyDate': '', 'SellDate': '',
+                            'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '',
+                            'HoldTime': '', 'GainDollars': '', 'SMA_A': '', 'SMA_B': ''
+                        })
+                    
+                    # Add walk-forward trades
+                    if walk_forward_trades:
+                        for trade in walk_forward_trades:
+                            # Format dates
+                            if isinstance(trade.get('Date'), datetime):
+                                trade_date = trade['Date'].strftime('%Y-%m-%d')
+                            else:
+                                trade_date = str(trade.get('Date', ''))
+                            
+                            if isinstance(trade.get('BuyDate'), datetime):
+                                buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                            else:
+                                buy_date = str(trade.get('BuyDate', ''))
+                            
+                            if isinstance(trade.get('SellDate'), datetime):
+                                sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                            else:
+                                sell_date = str(trade.get('SellDate', ''))
+                            
+                            all_trades.append({
+                                'Period': 'WALK-FORWARD TEST',
+                                'Trade Date': trade_date,
+                                'BuyDate': buy_date,
+                                'SellDate': sell_date,
+                                'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                                'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'HoldTime': trade.get('HoldTime', 0),
+                                'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                                'SMA_A': trade.get('SMA_A', ''),
+                                'SMA_B': trade.get('SMA_B', '')
+                            })
+                    
+                    if all_trades:
+                        # Set up columns
+                        columns = ['Period', 'Trade Date', 'BuyDate', 'SellDate', 
+                                  'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
+                                  'GainDollars', 'SMA_A', 'SMA_B']
+                        trades_tree["columns"] = columns
+                        for col in columns:
+                            trades_tree.heading(col, text=col)
+                            trades_tree.column(col, anchor="center", width=100)
+                        
+                        # Insert trades
+                        for trade in all_trades:
+                            values = [str(trade.get(col, '')) for col in columns]
+                            item = trades_tree.insert("", "end", values=values)
+                            # Style separator rows
+                            if '──' in str(trade.get('Period', '')):
+                                trades_tree.set(item, 'Period', '────────────────────────────────────')
+                        
+                        train_count = len(training_trades) if training_trades else 0
+                        test_count = len(walk_forward_trades) if walk_forward_trades else 0
+                        trades_status.config(text=f"✓ Showing {train_count} TRAINING trades | {test_count} WALK-FORWARD TEST trades")
+                    else:
+                        trades_explanation.config(text="")
+                        trades_status.config(text="No trades available.")
+                    return
+                
+                # Fallback to old segment structure
                 walk_forward_segment_trades = current_cache_data.get('walk_forward_segment_trades', [])
                 if not walk_forward_segment_trades:
                     trades_explanation.config(text="")
                     # Check if this might be an old cache file
                     cached_at = current_cache_data.get('cached_at', '')
                     if cached_at:
-                        trades_status.config(text=f"Walk-Forward Analysis: No segment trades available. This cache file may have been created before segment trades were stored. (Cached: {cached_at})")
+                        trades_status.config(text=f"Walk-Forward Analysis: No trades available. This cache file may have been created before trades were stored. (Cached: {cached_at})")
                     else:
-                        trades_status.config(text="Walk-Forward Analysis: No segment trades available. This may be an older cache file.")
+                        trades_status.config(text="Walk-Forward Analysis: No trades available. This may be an older cache file.")
                     return
                 
-                # Show explanation
+                # Show explanation for old structure
                 explanation_text = (
                     "WALK-FORWARD ANALYSIS EXPLANATION:\n"
                     "• Each segment has a TRAINING period (to find best parameters) and a TEST period (to test those parameters)\n"

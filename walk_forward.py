@@ -52,307 +52,188 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     if len(data) == 0:
         raise ValueError("No data available for walk-forward analysis")
     
-    # Calculate periods in days
-    backtest_period = relativedelta(years=backtest_period_years, months=backtest_period_months)
-    walk_forward_period = relativedelta(years=walk_forward_period_years, months=walk_forward_period_months)
-    rebalance_period = relativedelta(years=rebalance_years, months=rebalance_months) if not rebalance_none else None
+    # Simple walk-forward: Train on first X years, test on remaining years
+    # Calculate training period
+    train_start = data['Date'].min()
+    train_period = relativedelta(years=backtest_period_years, months=backtest_period_months)
+    train_end = train_start + train_period
     
-    # Generate walk-forward segments
-    segments = []
-    current_end = end_date_dt
+    # Test period is everything after training period
+    test_start = train_end + timedelta(days=1)  # Start test day after training ends
+    test_end = data['Date'].max()
     
-    while True:
-        # Calculate test period end (current_end) and start
-        test_end = current_end
-        test_start = test_end - walk_forward_period
-        
-        # Calculate training period
-        train_end = test_start - timedelta(days=1)  # End training day before test starts
-        train_start = train_end - backtest_period
-        
-        # Check if we have enough data
-        if train_start < data['Date'].min():
-            break
-        
-        segments.append({
-            'train_start': train_start,
-            'train_end': train_end,
-            'test_start': test_start,
-            'test_end': test_end
-        })
-        
-        # Move to next segment
-        if rebalance_none:
-            # Only do initial optimization, then walk forward without re-optimizing
-            break
-        elif rebalance_period is None:
-            # No rebalancing - only initial segment
-            break
-        else:
-            # Move back by rebalance period
-            current_end = test_start - timedelta(days=1)
+    # Check if we have enough data
+    if train_end >= test_end:
+        raise ValueError(f"Not enough data for walk-forward. Training period ({backtest_period_years} years, {backtest_period_months} months) exceeds available data.")
     
-    if len(segments) == 0:
-        raise ValueError("Not enough historical data for walk-forward analysis")
+    if progress_callback:
+        progress_callback(10)
     
-    # Reverse segments to process chronologically (oldest first)
-    segments.reverse()
+    print(f"Walk-forward analysis:")
+    print(f"  Training Period: {train_start.date()} to {train_end.date()}")
+    print(f"  Test Period: {test_start.date()} to {test_end.date()}")
     
-    print(f"Walk-forward analysis: {len(segments)} segments")
-    for i, seg in enumerate(segments):
-        print(f"  Segment {i+1}: Train {seg['train_start'].date()} to {seg['train_end'].date()}, "
-              f"Test {seg['test_start'].date()} to {seg['test_end'].date()}")
+    # Get training data
+    train_data = data[(data['Date'] >= train_start) & (data['Date'] <= train_end)].copy()
     
-    # Track aggregate results for each SMA pair
-    # Key: (sma_a, sma_b), Value: aggregated metrics
-    aggregate_results = {}
-    best_pairs_per_segment = []
+    if len(train_data) == 0:
+        raise ValueError("No training data available")
     
-    # Track training and walk-forward scores separately
-    training_scores = []  # Scores from optimization periods
-    walk_forward_scores = []  # Scores from test periods
+    # Run optimization on training period
+    if progress_callback:
+        progress_callback(20)
     
-    # Store walk-forward trades per segment
-    walk_forward_segment_trades = []  # List of dicts with segment info and trades
+    train_result = algorithm.run_algorithm(
+        train_data,
+        start_amount=start_amount,
+        progress_callback=lambda p: progress_callback(20 + p * 0.4) if progress_callback else None,
+        compounding=compounding,
+        optimization_objective=optimization_objective,
+        start_date=train_start.strftime("%Y-%m-%d"),
+        end_date=train_end.strftime("%Y-%m-%d"),
+        use_cache=True
+    )
     
-    # Process each segment
-    total_segments = len(segments)
-    for seg_idx, segment in enumerate(segments):
-        if progress_callback:
-            segment_progress = (seg_idx / total_segments) * 90  # 90% for segments, 10% for final aggregation
-            progress_callback(segment_progress)
-        
-        # Get training data
-        train_data = data[(data['Date'] >= segment['train_start']) & 
-                         (data['Date'] <= segment['train_end'])].copy()
-        
-        if len(train_data) == 0:
-            continue
-        
-        # Run optimization on training period
-        train_result = algorithm.run_algorithm(
-            train_data,
-            start_amount=start_amount,
-            progress_callback=None,  # Don't show progress for individual optimizations
-            compounding=compounding,
-            optimization_objective=optimization_objective,
-            start_date=segment['train_start'].strftime("%Y-%m-%d"),
-            end_date=segment['train_end'].strftime("%Y-%m-%d"),
-            use_cache=True
-        )
-        
-        if "Error" in train_result:
-            continue
-        
-        # Get best SMA pair from training
-        best_a = train_result['outputresults1']['besta']
-        best_b = train_result['outputresults1']['bestb']
-        best_pairs_per_segment.append((best_a, best_b))
-        
-        # Calculate training period score
-        try:
-            training_score = scoring.calculate_backtest_score(train_result, scoring_config)
-            training_scores.append(training_score)
-        except Exception as e:
-            print(f"Error calculating training score: {e}")
-            training_score = 0.0
-            training_scores.append(0.0)
-        
-        # Get test data
-        test_data = data[(data['Date'] >= segment['test_start']) & 
-                        (data['Date'] <= segment['test_end'])].copy()
-        
-        if len(test_data) == 0:
-            continue
-        
-        # Test the best pair on test period
-        # We need to run the algorithm with fixed parameters
-        test_result = run_fixed_parameters_backtest(
-            test_data,
-            sma_a=best_a,
-            sma_b=best_b,
-            start_amount=start_amount,
-            compounding=compounding,
-            start_date=segment['test_start'].strftime("%Y-%m-%d"),
-            end_date=segment['test_end'].strftime("%Y-%m-%d")
-        )
-        
-        if test_result is None:
-            continue
-        
-        # Store trades for this segment
-        segment_trades = test_result.get('trades', [])
-        if segment_trades:
-            # Add segment metadata to each trade for display
-            for trade in segment_trades:
-                trade['Segment'] = seg_idx + 1
-                trade['TestStart'] = segment['test_start']
-                trade['TestEnd'] = segment['test_end']
-                trade['TrainStart'] = segment['train_start']
-                trade['TrainEnd'] = segment['train_end']
-                trade['SMA_A'] = best_a
-                trade['SMA_B'] = best_b
-        
-        walk_forward_segment_trades.append({
-            'segment': seg_idx + 1,
-            'train_start': segment['train_start'],
-            'train_end': segment['train_end'],
-            'test_start': segment['test_start'],
-            'test_end': segment['test_end'],
-            'sma_a': best_a,
-            'sma_b': best_b,
-            'trades': segment_trades
-        })
-        
-        # Calculate walk-forward test period score
-        # Convert test_result to format expected by scoring function
-        test_result_formatted = {
+    if "Error" in train_result:
+        return train_result
+    
+    # Get best SMA pair from training (using scoring to find best)
+    all_combinations_train = train_result.get('all_combinations', [])
+    if not all_combinations_train:
+        return {"Error": "No combinations found in training period"}
+    
+    # Score all training combinations and find best
+    best_train_combo = None
+    best_train_score = -np.inf
+    best_train_idx = 0
+    
+    for idx, combo in enumerate(all_combinations_train):
+        combo_result = {
             "outputresults1": {
-                "besttaxedreturn": test_result.get('return', 0.0),
-                "betteroff": 0.0,  # Would need buy-and-hold for test period
-                "besttradecount": test_result.get('trade_count', 0),
-                "noalgoreturn": 0.0
+                "besttaxedreturn": combo.get("taxed_return", 0),
+                "betteroff": combo.get("better_off", 0),
+                "besttradecount": combo.get("trade_count", 0),
+                "noalgoreturn": train_result.get("noalgoreturn", 0)
             },
             "outputresults2": {
-                "winningtradepct": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
-                "maxdrawdown(worst trade return pct)": test_result.get('max_drawdown', 0.0),
-                "average_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1)
+                "winningtradepct": combo.get("win_rate", 0),
+                "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
+                "average_hold_time": combo.get("avg_hold_time", 0)
             },
-            "param_stability": {
-                "taxed_return_std": 0.0,
-                "better_off_std": 0.0,
-                "win_rate_std": 0.0,
-                "taxed_return_max_min_diff": 0.0
-            }
+            "param_stability": train_result.get("param_stability", {})
         }
-        
-        try:
-            walk_forward_score = scoring.calculate_backtest_score(test_result_formatted, scoring_config)
-            walk_forward_scores.append(walk_forward_score)
-        except Exception as e:
-            print(f"Error calculating walk-forward score: {e}")
-            walk_forward_score = 0.0
-            walk_forward_scores.append(0.0)
-        
-        # Aggregate results for this SMA pair
-        pair_key = (best_a, best_b)
-        if pair_key not in aggregate_results:
-            aggregate_results[pair_key] = {
-                'sma_a': best_a,
-                'sma_b': best_b,
-                'total_trades': 0,
-                'winning_trades': 0,
-                'losing_trades': 0,
-                'total_return': 0.0,
-                'cumulative_pnl': 0.0,
-                'max_drawdown': 0.0,
-                'total_hold_time': 0.0,
-                'segments_used': 0,
-                'all_returns': [],
-                'all_drawdowns': []
-            }
-        
-        agg = aggregate_results[pair_key]
-        agg['segments_used'] += 1
-        agg['total_trades'] += test_result.get('trade_count', 0)
-        agg['winning_trades'] += test_result.get('winning_trades', 0)
-        agg['losing_trades'] += test_result.get('losing_trades', 0)
-        agg['total_hold_time'] += test_result.get('total_hold_time', 0.0)
-        agg['cumulative_pnl'] += test_result.get('pnl', 0.0)
-        agg['all_returns'].append(test_result.get('return', 0.0))
-        agg['all_drawdowns'].append(abs(test_result.get('max_drawdown', 0.0)))
-        
-        if test_result.get('max_drawdown', 0.0) < agg['max_drawdown']:
-            agg['max_drawdown'] = test_result.get('max_drawdown', 0.0)
+        score = scoring.calculate_backtest_score(combo_result, scoring_config)
+        if score > best_train_score:
+            best_train_score = score
+            best_train_combo = combo
+            best_train_idx = idx
     
-    # Calculate aggregate metrics
-    for pair_key, agg in aggregate_results.items():
-        if agg['total_trades'] > 0:
-            agg['win_rate'] = agg['winning_trades'] / agg['total_trades']
-            agg['avg_hold_time'] = agg['total_hold_time'] / agg['total_trades']
-        else:
-            agg['win_rate'] = 0.0
-            agg['avg_hold_time'] = 0.0
-        
-        # Calculate aggregate return
-        if len(agg['all_returns']) > 0:
-            # Compound returns across segments
-            total_return = 1.0
-            for ret in agg['all_returns']:
-                total_return *= (1 + ret)
-            agg['total_return'] = total_return - 1.0
-        else:
-            agg['total_return'] = 0.0
-        
-        # Average drawdown
-        if len(agg['all_drawdowns']) > 0:
-            agg['avg_drawdown'] = np.mean(agg['all_drawdowns'])
-        else:
-            agg['avg_drawdown'] = 0.0
+    if best_train_combo is None:
+        return {"Error": "Could not determine best training combination"}
     
-    # Calculate aggregate walk-forward score (average across all test segments)
-    avg_walk_forward_score = np.mean(walk_forward_scores) if walk_forward_scores else 0.0
-    avg_training_score = np.mean(training_scores) if training_scores else 0.0
+    best_a = best_train_combo['sma_a']
+    best_b = best_train_combo['sma_b']
     
-    # Calculate scores for each pair (aggregate across all segments)
-    all_combinations = []
-    for pair_key, agg in aggregate_results.items():
-        # Create result format for scoring
-        result = {
-            "outputresults1": {
-                "besttaxedreturn": agg['total_return'],
-                "betteroff": 0.0,  # Would need buy-and-hold for each segment
-                "besttradecount": agg['total_trades'],
-                "noalgoreturn": 0.0
-            },
-            "outputresults2": {
-                "winningtradepct": agg['win_rate'],
-                "maxdrawdown(worst trade return pct)": agg['max_drawdown'],
-                "average_hold_time": agg['avg_hold_time']
-            },
-            "param_stability": {
-                "taxed_return_std": np.std(agg['all_returns']) if len(agg['all_returns']) > 1 else 0.0,
-                "better_off_std": 0.0,
-                "win_rate_std": 0.0,
-                "taxed_return_max_min_diff": (max(agg['all_returns']) - min(agg['all_returns'])) if len(agg['all_returns']) > 0 else 0.0
-            }
+    # Get training trades for best combination
+    training_trades = train_result.get('besttrades', [])
+    # Add metadata to training trades
+    for trade in training_trades:
+        if isinstance(trade.get('Date'), datetime):
+            trade_date = trade['Date']
+        else:
+            trade_date = pd.to_datetime(trade.get('Date', train_start))
+        trade['Period'] = 'Training'
+        trade['SMA_A'] = best_a
+        trade['SMA_B'] = best_b
+    
+    # Calculate training score
+    training_score = best_train_score
+    
+    # Get test data
+    test_data = data[(data['Date'] >= test_start) & (data['Date'] <= test_end)].copy()
+    
+    if len(test_data) == 0:
+        return {"Error": "No test data available"}
+    
+    if progress_callback:
+        progress_callback(65)
+    
+    # Test the best pair on test period
+    test_result = run_fixed_parameters_backtest(
+        test_data,
+        sma_a=best_a,
+        sma_b=best_b,
+        start_amount=start_amount,
+        compounding=compounding,
+        start_date=test_start.strftime("%Y-%m-%d"),
+        end_date=test_end.strftime("%Y-%m-%d")
+    )
+    
+    if test_result is None:
+        return {"Error": "Failed to run test period backtest"}
+    
+    if progress_callback:
+        progress_callback(85)
+    
+    # Get walk-forward trades
+    walk_forward_trades = test_result.get('trades', [])
+    
+    # Add metadata to walk-forward trades
+    for trade in walk_forward_trades:
+        trade['Period'] = 'Walk-Forward Test'
+        trade['SMA_A'] = best_a
+        trade['SMA_B'] = best_b
+    
+    # Calculate walk-forward score
+    test_result_formatted = {
+        "outputresults1": {
+            "besttaxedreturn": test_result.get('return', 0.0),
+            "betteroff": 0.0,
+            "besttradecount": test_result.get('trade_count', 0),
+            "noalgoreturn": 0.0
+        },
+        "outputresults2": {
+            "winningtradepct": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
+            "maxdrawdown(worst trade return pct)": test_result.get('max_drawdown', 0.0),
+            "average_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1)
+        },
+        "param_stability": {
+            "taxed_return_std": 0.0,
+            "better_off_std": 0.0,
+            "win_rate_std": 0.0,
+            "taxed_return_max_min_diff": 0.0
         }
-        
-        aggregate_score = scoring.calculate_backtest_score(result, scoring_config)
-        
-        all_combinations.append({
-            'sma_a': agg['sma_a'],
-            'sma_b': agg['sma_b'],
-            'taxed_return': agg['total_return'],
-            'better_off': 0.0,
-            'win_rate': agg['win_rate'],
-            'trade_count': agg['total_trades'],
-            'winning_trades': agg['winning_trades'],
-            'losing_trades': agg['losing_trades'],
-            'max_drawdown': agg['max_drawdown'],
-            'avg_hold_time': agg['avg_hold_time'],
-            'segments_used': agg['segments_used'],
-            'aggregate_score': aggregate_score,
-            'training_score': avg_training_score,
-            'walk_forward_score': avg_walk_forward_score,
-            'combined_score': (avg_training_score * 0.4 + avg_walk_forward_score * 0.6)  # Weight: 40% training, 60% walk-forward
-        })
+    }
     
-    # Sort by combined score (or aggregate score if combined not available)
-    all_combinations.sort(key=lambda x: x.get('combined_score', x.get('aggregate_score', 0)), reverse=True)
+    walk_forward_score = scoring.calculate_backtest_score(test_result_formatted, scoring_config)
     
-    # Find best combination
+    # Create all_combinations list (just the best one for now, but formatted for compatibility)
+    all_combinations = [{
+        'sma_a': best_a,
+        'sma_b': best_b,
+        'taxed_return': test_result.get('return', 0.0),
+        'better_off': 0.0,
+        'win_rate': test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
+        'trade_count': test_result.get('trade_count', 0),
+        'winning_trades': test_result.get('winning_trades', 0),
+        'losing_trades': test_result.get('losing_trades', 0),
+        'max_drawdown': test_result.get('max_drawdown', 0.0),
+        'avg_hold_time': test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1),
+        'combined_score': walk_forward_score
+    }]
+    
+    # Find best combination (only one in simple mode)
     best_combo = all_combinations[0] if all_combinations else None
     best_idx = 0
     
     # Format output similar to regular algorithm
     outputresults1 = {
-        "betteroff": best_combo['better_off'] if best_combo else 0.0,
-        "besttaxedreturn": best_combo['taxed_return'] if best_combo else 0.0,
+        "betteroff": 0.0,
+        "besttaxedreturn": test_result.get('return', 0.0),
         "noalgoreturn": 0.0,
-        "besta": best_combo['sma_a'] if best_combo else 0,
-        "bestb": best_combo['sma_b'] if best_combo else 0,
-        "besttradecount": best_combo['trade_count'] if best_combo else 0,
+        "besta": best_a,
+        "bestb": best_b,
+        "besttradecount": test_result.get('trade_count', 0),
         "avgtradepct": 0.0,
         "iterations": 0,
         "combinations": len(all_combinations),
@@ -363,88 +244,60 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     
     outputresults2 = {
         "startamount": start_amount,
-        "bestendtaxed_liquidity": start_amount * (1 + best_combo['taxed_return']) if best_combo else start_amount,
+        "bestendtaxed_liquidity": start_amount * (1 + test_result.get('return', 0.0)),
         "(noalgoreturn+1)*startamount": start_amount,
-        "losingtrades": best_combo['losing_trades'] if best_combo else 0,
-        "losingtradepct": 1 - best_combo['win_rate'] if best_combo else 0.0,
-        "winningtradepct": best_combo['win_rate'] if best_combo else 0.0,
-        "maxdrawdown(worst trade return pct)": best_combo['max_drawdown'] if best_combo else 0.0,
-        "average_hold_time": best_combo['avg_hold_time'] if best_combo else 0.0,
+        "losingtrades": test_result.get('losing_trades', 0),
+        "losingtradepct": 1 - (test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1)),
+        "winningtradepct": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
+        "maxdrawdown(worst trade return pct)": test_result.get('max_drawdown', 0.0),
+        "average_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1),
         "win_percentage_last_4_trades": None
     }
     
-    param_stability = {
-        "taxed_return_avg": np.mean([c['taxed_return'] for c in all_combinations]) if all_combinations else 0.0,
-        "taxed_return_std": np.std([c['taxed_return'] for c in all_combinations]) if len(all_combinations) > 1 else 0.0,
-        "taxed_return_max": max([c['taxed_return'] for c in all_combinations]) if all_combinations else 0.0,
-        "taxed_return_min": min([c['taxed_return'] for c in all_combinations]) if all_combinations else 0.0,
-        "taxed_return_max_min_diff": 0.0,
-        "taxed_return_max_avg_diff": 0.0,
-        "better_off_avg": 0.0,
-        "better_off_std": 0.0,
-        "better_off_max": 0.0,
-        "better_off_min": 0.0,
-        "better_off_max_min_diff": 0.0,
-        "better_off_max_avg_diff": 0.0,
-        "win_rate_avg": np.mean([c['win_rate'] for c in all_combinations]) if all_combinations else 0.0,
-        "win_rate_std": np.std([c['win_rate'] for c in all_combinations]) if len(all_combinations) > 1 else 0.0,
-        "win_rate_max": max([c['win_rate'] for c in all_combinations]) if all_combinations else 0.0,
-        "win_rate_min": min([c['win_rate'] for c in all_combinations]) if all_combinations else 0.0,
-        "win_rate_max_min_diff": 0.0,
-        "win_rate_max_avg_diff": 0.0,
-        "trade_count_avg": np.mean([c['trade_count'] for c in all_combinations]) if all_combinations else 0.0,
-        "trade_count_std": np.std([c['trade_count'] for c in all_combinations]) if len(all_combinations) > 1 else 0.0,
-        "trade_count_max": max([c['trade_count'] for c in all_combinations]) if all_combinations else 0,
-        "trade_count_min": min([c['trade_count'] for c in all_combinations]) if all_combinations else 0,
-        "trade_count_max_min_diff": 0,
-        "trade_count_max_avg_diff": 0
+    param_stability = train_result.get("param_stability", {})
+    
+    # Calculate training and walk-forward metrics
+    training_metrics = {
+        "taxed_return": best_train_combo.get('taxed_return', 0.0),
+        "better_off": best_train_combo.get('better_off', 0.0),
+        "trade_count": best_train_combo.get('trade_count', 0),
+        "win_rate": best_train_combo.get('win_rate', 0.0),
+        "max_drawdown": best_train_combo.get('max_drawdown', 0.0),
+        "avg_hold_time": best_train_combo.get('avg_hold_time', 0.0),
+        "winning_trades": best_train_combo.get('winning_trades', 0),
+        "losing_trades": best_train_combo.get('losing_trades', 0)
     }
     
-    if progress_callback:
-        progress_callback(100)
-    
-    # Calculate training and walk-forward metrics for caching
-    training_metrics = {}
-    walk_forward_metrics = {}
-    
-    if best_combo:
-        # Aggregate training metrics (from all training periods)
-        training_metrics = {
-            "taxed_return": best_combo.get('taxed_return', 0.0),  # This is actually walk-forward return
-            "better_off": 0.0,
-            "trade_count": best_combo.get('trade_count', 0),
-            "win_rate": best_combo.get('win_rate', 0.0),
-            "max_drawdown": best_combo.get('max_drawdown', 0.0),
-            "avg_hold_time": best_combo.get('avg_hold_time', 0.0)
-        }
-        
-        # Walk-forward metrics (same as training for now, but separated for clarity)
-        walk_forward_metrics = {
-            "taxed_return": best_combo.get('taxed_return', 0.0),
-            "better_off": 0.0,
-            "trade_count": best_combo.get('trade_count', 0),
-            "win_rate": best_combo.get('win_rate', 0.0),
-            "max_drawdown": best_combo.get('max_drawdown', 0.0),
-            "avg_hold_time": best_combo.get('avg_hold_time', 0.0),
-            "winning_trades": best_combo.get('winning_trades', 0),
-            "losing_trades": best_combo.get('losing_trades', 0)
-        }
+    walk_forward_metrics = {
+        "taxed_return": test_result.get('return', 0.0),
+        "better_off": 0.0,
+        "trade_count": test_result.get('trade_count', 0),
+        "win_rate": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
+        "max_drawdown": test_result.get('max_drawdown', 0.0),
+        "avg_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1),
+        "winning_trades": test_result.get('winning_trades', 0),
+        "losing_trades": test_result.get('losing_trades', 0)
+    }
     
     return {
         "outputresults1": outputresults1,
         "outputresults2": outputresults2,
         "param_stability": param_stability,
-        "besttrades": [],  # Empty for walk-forward (trades stored per segment)
+        "besttrades": training_trades,  # Training period trades
         "all_combinations": all_combinations,
-        "best_combination_idx": best_idx,
-        "noalgoreturn": 0.0,
+        "best_combination_idx": 0,
+        "noalgoreturn": train_result.get("noalgoreturn", 0.0),
         "walk_forward_mode": True,
-        "segments": len(segments),
-        "best_pairs_per_segment": best_pairs_per_segment,
-        "training_score": avg_training_score,
-        "walk_forward_score": avg_walk_forward_score,
-        "combined_score": (avg_training_score * 0.4 + avg_walk_forward_score * 0.6) if (training_scores and walk_forward_scores) else 0.0,
-        "walk_forward_segment_trades": walk_forward_segment_trades,  # Store trades per segment
+        "segments": 1,  # Simple mode has 1 segment
+        "training_score": training_score,
+        "walk_forward_score": walk_forward_score,
+        "combined_score": (training_score * 0.4 + walk_forward_score * 0.6),
+        "training_trades": training_trades,  # Store training trades separately
+        "walk_forward_trades": walk_forward_trades,  # Store walk-forward trades separately
+        "training_period": {"start": train_start, "end": train_end},
+        "test_period": {"start": test_start, "end": test_end},
+        "best_sma_a": best_a,
+        "best_sma_b": best_b,
         "training_metrics": training_metrics,
         "walk_forward_metrics": walk_forward_metrics
     }
@@ -615,7 +468,7 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
                                    walk_forward_period_years=1, walk_forward_period_months=0,
                                    scoring_config=None, training_result=None):
     """
-    Run walk-forward analysis using the best scored combo from a training period.
+    Run simple walk-forward analysis for batch mode: Train on first X years, test on remaining years.
     This is optimized for batch runs where we first run regular algorithm to find best combo.
     """
     
@@ -639,56 +492,41 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     if len(data) == 0:
         return {"Error": "No data available for walk-forward analysis"}
     
-    # Calculate periods
-    backtest_period = relativedelta(years=backtest_period_years, months=backtest_period_months)
-    walk_forward_period = relativedelta(years=walk_forward_period_years, months=walk_forward_period_months)
+    # Calculate training period
+    train_start = data['Date'].min()
+    train_period = relativedelta(years=backtest_period_years, months=backtest_period_months)
+    train_end = train_start + train_period
     
-    # Generate walk-forward segments
-    segments = []
-    current_end = end_date_dt
+    # Test period is everything after training period
+    test_start = train_end + timedelta(days=1)  # Start test day after training ends
+    test_end = data['Date'].max()
     
-    while True:
-        test_end = current_end
-        test_start = test_end - walk_forward_period
-        train_end = test_start - timedelta(days=1)
-        train_start = train_end - backtest_period
-        
-        if train_start < data['Date'].min():
-            break
-        
-        segments.append({
-            'train_start': train_start,
-            'train_end': train_end,
-            'test_start': test_start,
-            'test_end': test_end
-        })
-        
-        # Move to next segment (no rebalancing for batch mode)
-        current_end = test_start - timedelta(days=1)
+    # Check if we have enough data
+    if train_end >= test_end:
+        return {"Error": f"Not enough data for walk-forward. Training period ({backtest_period_years} years, {backtest_period_months} months) exceeds available data."}
     
-    if len(segments) == 0:
-        return {"Error": "Not enough historical data for walk-forward analysis"}
+    if progress_callback:
+        progress_callback(10)
     
-    segments.reverse()  # Process chronologically
-    
-    # If training_result provided, use it; otherwise run training on first segment
+    # If training_result provided, use it; otherwise run training
     if training_result is None or "Error" in training_result:
-        # Run training on first segment to get best combo
-        first_segment = segments[0]
-        train_data = data[(data['Date'] >= first_segment['train_start']) & 
-                         (data['Date'] <= first_segment['train_end'])].copy()
+        # Get training data
+        train_data = data[(data['Date'] >= train_start) & (data['Date'] <= train_end)].copy()
         
         if len(train_data) == 0:
             return {"Error": "No training data available"}
         
+        if progress_callback:
+            progress_callback(20)
+        
         training_result = algorithm.run_algorithm(
             train_data,
             start_amount=start_amount,
-            progress_callback=None,
+            progress_callback=lambda p: progress_callback(20 + p * 0.4) if progress_callback else None,
             compounding=compounding,
             optimization_objective=optimization_objective,
-            start_date=first_segment['train_start'].strftime("%Y-%m-%d"),
-            end_date=first_segment['train_end'].strftime("%Y-%m-%d"),
+            start_date=train_start.strftime("%Y-%m-%d"),
+            end_date=train_end.strftime("%Y-%m-%d"),
             use_cache=True
         )
     
@@ -732,120 +570,117 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     best_a = best_combo['sma_a']
     best_b = best_combo['sma_b']
     
+    # Get training trades for best combination
+    training_trades = training_result.get('besttrades', [])
+    # Add metadata to training trades
+    for trade in training_trades:
+        if isinstance(trade.get('Date'), datetime):
+            trade_date = trade['Date']
+        else:
+            trade_date = pd.to_datetime(trade.get('Date', train_start))
+        trade['Period'] = 'Training'
+        trade['SMA_A'] = best_a
+        trade['SMA_B'] = best_b
+    
     # Calculate training score
     training_score = best_score
     
-    # Now run walk-forward tests using this best combo
-    walk_forward_results = []
-    walk_forward_scores = []
-    walk_forward_segment_trades = []  # Store trades per segment
+    # Get test data
+    test_data = data[(data['Date'] >= test_start) & (data['Date'] <= test_end)].copy()
     
-    total_segments = len(segments)
-    for seg_idx, segment in enumerate(segments):
-        if progress_callback:
-            segment_progress = (seg_idx / total_segments) * 90
-            progress_callback(segment_progress)
-        
-        # Get test data
-        test_data = data[(data['Date'] >= segment['test_start']) & 
-                        (data['Date'] <= segment['test_end'])].copy()
-        
-        if len(test_data) == 0:
-            continue
-        
-        # Test the best combo on test period
-        test_result = run_fixed_parameters_backtest(
-            test_data,
-            sma_a=best_a,
-            sma_b=best_b,
-            start_amount=start_amount,
-            compounding=compounding,
-            start_date=segment['test_start'].strftime("%Y-%m-%d"),
-            end_date=segment['test_end'].strftime("%Y-%m-%d")
-        )
-        
-        if test_result is None:
-            continue
-        
-        # Store trades for this segment
-        segment_trades = test_result.get('trades', [])
-        if segment_trades:
-            # Add segment metadata to each trade for display
-            for trade in segment_trades:
-                trade['Segment'] = seg_idx + 1
-                trade['TestStart'] = segment['test_start']
-                trade['TestEnd'] = segment['test_end']
-                trade['TrainStart'] = segment['train_start']
-                trade['TrainEnd'] = segment['train_end']
-                trade['SMA_A'] = best_a
-                trade['SMA_B'] = best_b
-        
-        walk_forward_segment_trades.append({
-            'segment': seg_idx + 1,
-            'train_start': segment['train_start'],
-            'train_end': segment['train_end'],
-            'test_start': segment['test_start'],
-            'test_end': segment['test_end'],
-            'sma_a': best_a,
-            'sma_b': best_b,
-            'trades': segment_trades
-        })
-        
-        # Calculate walk-forward score
-        test_result_formatted = {
-            "outputresults1": {
-                "besttaxedreturn": test_result.get('return', 0.0),
-                "betteroff": 0.0,
-                "besttradecount": test_result.get('trade_count', 0),
-                "noalgoreturn": 0.0
-            },
-            "outputresults2": {
-                "winningtradepct": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
-                "maxdrawdown(worst trade return pct)": test_result.get('max_drawdown', 0.0),
-                "average_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1)
-            },
-            "param_stability": {
-                "taxed_return_std": 0.0,
-                "better_off_std": 0.0,
-                "win_rate_std": 0.0,
-                "taxed_return_max_min_diff": 0.0
-            }
+    if len(test_data) == 0:
+        return {"Error": "No test data available"}
+    
+    if progress_callback:
+        progress_callback(65)
+    
+    # Test the best pair on test period
+    test_result = run_fixed_parameters_backtest(
+        test_data,
+        sma_a=best_a,
+        sma_b=best_b,
+        start_amount=start_amount,
+        compounding=compounding,
+        start_date=test_start.strftime("%Y-%m-%d"),
+        end_date=test_end.strftime("%Y-%m-%d")
+    )
+    
+    if test_result is None:
+        return {"Error": "Failed to run test period backtest"}
+    
+    if progress_callback:
+        progress_callback(85)
+    
+    # Get walk-forward trades
+    walk_forward_trades = test_result.get('trades', [])
+    
+    # Add metadata to walk-forward trades
+    for trade in walk_forward_trades:
+        trade['Period'] = 'Walk-Forward Test'
+        trade['SMA_A'] = best_a
+        trade['SMA_B'] = best_b
+    
+    # Calculate walk-forward score
+    test_result_formatted = {
+        "outputresults1": {
+            "besttaxedreturn": test_result.get('return', 0.0),
+            "betteroff": 0.0,
+            "besttradecount": test_result.get('trade_count', 0),
+            "noalgoreturn": 0.0
+        },
+        "outputresults2": {
+            "winningtradepct": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
+            "maxdrawdown(worst trade return pct)": test_result.get('max_drawdown', 0.0),
+            "average_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1)
+        },
+        "param_stability": {
+            "taxed_return_std": 0.0,
+            "better_off_std": 0.0,
+            "win_rate_std": 0.0,
+            "taxed_return_max_min_diff": 0.0
         }
-        
-        wf_score = scoring.calculate_backtest_score(test_result_formatted, scoring_config)
-        walk_forward_scores.append(wf_score)
-        walk_forward_results.append(test_result)
+    }
     
-    # Calculate aggregate walk-forward metrics
-    if not walk_forward_results:
-        return {"Error": "No walk-forward test results"}
-    
-    avg_walk_forward_score = sum(walk_forward_scores) / len(walk_forward_scores) if walk_forward_scores else 0.0
-    
-    # Aggregate walk-forward metrics
-    total_wf_trades = sum(r.get('trade_count', 0) for r in walk_forward_results)
-    total_wf_wins = sum(r.get('winning_trades', 0) for r in walk_forward_results)
-    total_wf_losses = sum(r.get('losing_trades', 0) for r in walk_forward_results)
-    total_wf_return = sum(r.get('return', 0.0) for r in walk_forward_results) / len(walk_forward_results)
-    total_wf_pnl = sum(r.get('pnl', 0.0) for r in walk_forward_results)
-    wf_max_drawdown = min([r.get('max_drawdown', 0.0) for r in walk_forward_results])
-    avg_wf_hold_time = sum(r.get('total_hold_time', 0.0) for r in walk_forward_results) / max(total_wf_trades, 1)
+    walk_forward_score = scoring.calculate_backtest_score(test_result_formatted, scoring_config)
     
     # Format results similar to regular walk forward
     outputresults1 = {
         "besta": best_a,
         "bestb": best_b,
-        "besttaxedreturn": total_wf_return,
+        "besttaxedreturn": test_result.get('return', 0.0),
         "betteroff": 0.0,
-        "besttradecount": total_wf_trades,
+        "besttradecount": test_result.get('trade_count', 0),
         "noalgoreturn": 0.0,
         "optimization_objective": optimization_objective
     }
     
     outputresults2 = {
-        "winningtradepct": total_wf_wins / max(total_wf_trades, 1),
-        "maxdrawdown(worst trade return pct)": wf_max_drawdown,
-        "average_hold_time": avg_wf_hold_time
+        "winningtradepct": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
+        "maxdrawdown(worst trade return pct)": test_result.get('max_drawdown', 0.0),
+        "average_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1)
+    }
+    
+    # Calculate training and walk-forward metrics
+    training_metrics = {
+        "taxed_return": best_combo.get('taxed_return', 0.0),
+        "better_off": best_combo.get('better_off', 0.0),
+        "trade_count": best_combo.get('trade_count', 0),
+        "win_rate": best_combo.get('win_rate', 0.0),
+        "max_drawdown": best_combo.get('max_drawdown', 0.0),
+        "avg_hold_time": best_combo.get('avg_hold_time', 0.0),
+        "winning_trades": best_combo.get('winning_trades', 0),
+        "losing_trades": best_combo.get('losing_trades', 0)
+    }
+    
+    walk_forward_metrics = {
+        "taxed_return": test_result.get('return', 0.0),
+        "better_off": 0.0,
+        "trade_count": test_result.get('trade_count', 0),
+        "win_rate": test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
+        "max_drawdown": test_result.get('max_drawdown', 0.0),
+        "avg_hold_time": test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1),
+        "winning_trades": test_result.get('winning_trades', 0),
+        "losing_trades": test_result.get('losing_trades', 0)
     }
     
     if progress_callback:
@@ -855,33 +690,23 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
         "outputresults1": outputresults1,
         "outputresults2": outputresults2,
         "param_stability": training_result.get("param_stability", {}),
-        "besttrades": [],
+        "besttrades": training_trades,  # Training period trades
         "all_combinations": all_combinations,
         "best_combination_idx": best_idx,
         "noalgoreturn": training_result.get("noalgoreturn", 0),
         "walk_forward_mode": True,
         "batch_mode": True,
-        "segments": len(segments),
+        "segments": 1,  # Simple mode has 1 segment
         "training_score": training_score,
-        "walk_forward_score": avg_walk_forward_score,
-        "training_metrics": {
-            "taxed_return": best_combo.get("taxed_return", 0),
-            "better_off": best_combo.get("better_off", 0),
-            "win_rate": best_combo.get("win_rate", 0),
-            "trade_count": best_combo.get("trade_count", 0),
-            "max_drawdown": best_combo.get("max_drawdown", 0),
-            "avg_hold_time": best_combo.get("avg_hold_time", 0)
-        },
-        "walk_forward_metrics": {
-            "taxed_return": total_wf_return,
-            "win_rate": total_wf_wins / max(total_wf_trades, 1),
-            "trade_count": total_wf_trades,
-            "winning_trades": total_wf_wins,
-            "losing_trades": total_wf_losses,
-            "max_drawdown": wf_max_drawdown,
-            "avg_hold_time": avg_wf_hold_time,
-            "total_pnl": total_wf_pnl
-        },
-        "walk_forward_segment_trades": walk_forward_segment_trades  # Store trades per segment
+        "walk_forward_score": walk_forward_score,
+        "combined_score": (training_score * 0.4 + walk_forward_score * 0.6),
+        "training_trades": training_trades,  # Store training trades separately
+        "walk_forward_trades": walk_forward_trades,  # Store walk-forward trades separately
+        "training_period": {"start": train_start, "end": train_end},
+        "test_period": {"start": test_start, "end": test_end},
+        "best_sma_a": best_a,
+        "best_sma_b": best_b,
+        "training_metrics": training_metrics,
+        "walk_forward_metrics": walk_forward_metrics
     }
 

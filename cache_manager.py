@@ -131,7 +131,8 @@ def get_cache_path(cache_key, ticker=None, start_date=None, end_date=None, compo
 def save_backtest_cache(ticker, start_date, end_date, compounding, optimization_objective, 
                        start_amount, all_combinations, best_combination_idx, noalgoreturn, besttrades=None,
                        walk_forward_mode=False, segments=0, training_score=0.0, walk_forward_score=0.0, combined_score=0.0,
-                       training_metrics=None, walk_forward_metrics=None, walk_forward_segment_trades=None, batch_dir=None):
+                       training_metrics=None, walk_forward_metrics=None, walk_forward_segment_trades=None, 
+                       training_trades=None, walk_forward_trades=None, batch_dir=None):
     """
     Save all combination results to cache.
     
@@ -209,7 +210,9 @@ def save_backtest_cache(ticker, start_date, end_date, compounding, optimization_
         'combined_score': combined_score,
         'training_metrics': training_metrics if training_metrics else {},
         'walk_forward_metrics': walk_forward_metrics if walk_forward_metrics else {},
-        'walk_forward_segment_trades': walk_forward_segment_trades if walk_forward_segment_trades else []  # Store trades per segment
+        'walk_forward_segment_trades': walk_forward_segment_trades if walk_forward_segment_trades else [],  # Legacy support
+        'training_trades': training_trades if training_trades else [],  # Training period trades
+        'walk_forward_trades': walk_forward_trades if walk_forward_trades else []  # Walk-forward test period trades
     }
     
     try:
