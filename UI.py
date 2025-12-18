@@ -38,6 +38,28 @@ import scoring
 import visual  # <-- (1) Import the new visual.py
 import cache_manager  # Import cache manager for viewing cached results
 
+# Debug logging to file
+DEBUG_LOG_FILE = "debug_log.txt"
+
+def debug_log(message):
+    """Write debug message to log file."""
+    try:
+        with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception as e:
+        # Fallback to console if file write fails
+        print(f"DEBUG LOG ERROR: {e}")
+        print(message)
+
+def clear_debug_log():
+    """Clear the debug log file for a new run."""
+    try:
+        with open(DEBUG_LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(f"=== DEBUG LOG STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n\n")
+    except Exception:
+        pass
+
 # Global variable to store algorithm results
 algorithm_results = {}
 
@@ -431,6 +453,25 @@ def on_run_now():
                 walk_forward_years = walk_forward_years_var.get()
                 walk_forward_months = walk_forward_months_var.get()
                 
+                # Validate: training + walk-forward must equal total timeframe
+                total_years = timeframe_years
+                total_months = timeframe_months
+                training_total_months = backtest_years * 12 + backtest_months
+                wf_total_months = walk_forward_years * 12 + walk_forward_months
+                total_total_months = total_years * 12 + total_months
+                
+                if training_total_months + wf_total_months != total_total_months:
+                    messagebox.showerror(
+                        "Timeframe Mismatch",
+                        f"Training period ({backtest_years}Y {backtest_months}M) + Walk-forward period ({walk_forward_years}Y {walk_forward_months}M) "
+                        f"must equal Total timeframe ({total_years}Y {total_months}M).\n\n"
+                        f"Current sum: {(training_total_months + wf_total_months) // 12}Y {(training_total_months + wf_total_months) % 12}M\n"
+                        f"Required: {total_years}Y {total_months}M"
+                    )
+                    update_progress(0)
+                    set_status("Ready")
+                    return
+                
                 walk_forward_config = {
                     "backtest_period_years": backtest_years,
                     "backtest_period_months": backtest_months,
@@ -557,36 +598,22 @@ def on_run_now():
                             # For single stock, use regular walk forward
                             import walk_forward
                             if is_batch_run:
-                                # First run regular algorithm to get best combo
-                                training_result = algorithm.run_algorithm(
+                                # Run batch walk forward - it will handle training period internally
+                                # Don't pass training_result from full timeframe - let it recalculate on training period only
+                                result = walk_forward.run_batch_walk_forward_analysis(
                                     ticker_data,
                                     start_amount=10000,
-                                    progress_callback=lambda p: progress_callback(p * 0.5),  # Use first half of progress
+                                    progress_callback=progress_callback,
                                     compounding=is_compounding,
                                     optimization_objective=optimization_objective,
-                                    start_date=start_date_str,
                                     end_date=end_date_str,
-                                    use_cache=True
+                                    backtest_period_years=walk_forward_config['backtest_period_years'],
+                                    backtest_period_months=walk_forward_config['backtest_period_months'],
+                                    walk_forward_period_years=walk_forward_config['walk_forward_period_years'],
+                                    walk_forward_period_months=walk_forward_config['walk_forward_period_months'],
+                                    scoring_config=scoring_config,
+                                    training_result=None  # Let it recalculate on training period only
                                 )
-                                
-                                if "Error" not in training_result:
-                                    # Then run batch walk forward on best combo
-                                    result = walk_forward.run_batch_walk_forward_analysis(
-                                        ticker_data,
-                                        start_amount=10000,
-                                        progress_callback=lambda p: progress_callback(50 + p * 0.5),  # Use second half
-                                        compounding=is_compounding,
-                                        optimization_objective=optimization_objective,
-                                        end_date=end_date_str,
-                                        backtest_period_years=walk_forward_config['backtest_period_years'],
-                                        backtest_period_months=walk_forward_config['backtest_period_months'],
-                                        walk_forward_period_years=walk_forward_config['walk_forward_period_years'],
-                                        walk_forward_period_months=walk_forward_config['walk_forward_period_months'],
-                                        scoring_config=scoring_config,
-                                        training_result=training_result
-                                    )
-                                else:
-                                    result = training_result
                             else:
                                 # Single stock: use regular walk forward
                                 result = walk_forward.run_walk_forward_analysis(
@@ -932,7 +959,7 @@ def view_trade_table():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -974,7 +1001,7 @@ def view_trade_table():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -1051,7 +1078,7 @@ def view_trade_table():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -1195,7 +1222,7 @@ def view_trade_table():
                             'SellDate': sell_date,
                             'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                             'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                             'HoldTime': trade.get('HoldTime', 0),
                             'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                             'SMA_A': trade.get('SMA_A', ''),
@@ -1620,6 +1647,8 @@ def view_batch_results():
     """Comprehensive results view - handles both single stock and batch results with full drill-down capability."""
     global algorithm_results, scoring_config
     
+    # Clear debug log for new run
+    
     if not algorithm_results:
         messagebox.showwarning("No Data", "Please run the algorithm first before viewing results.")
         return
@@ -1763,6 +1792,7 @@ def view_batch_results():
             try:
                 # For walk-forward, we need to rescore training and walk-forward separately
                 if result.get("walk_forward_mode", False):
+                    
                     # Rescore training period using training_metrics
                     training_metrics = result.get("training_metrics", {})
                     if training_metrics:
@@ -1803,9 +1833,13 @@ def view_batch_results():
                         new_wf_score = scoring.calculate_backtest_score(wf_result, scoring_config)
                         result["walk_forward_score"] = new_wf_score
                         
-                        # Update combined score
+                        # Update combined score using configurable weights
                         training_score = result.get("training_score", 0.0)
-                        result["combined_score"] = training_score * 0.4 + new_wf_score * 0.6
+                        combined_weighting = scoring_config.get("combined_score_weighting", {})
+                        training_weight = combined_weighting.get("training_weight", 0.4)
+                        wf_weight = combined_weighting.get("walk_forward_weight", 0.6)
+                        new_combined_score = training_score * training_weight + new_wf_score * wf_weight
+                        result["combined_score"] = new_combined_score
                 else:
                     # Standard backtest - rescore using current config
                     # The score is calculated on-the-fly, but we can mark it as rescored
@@ -2184,7 +2218,7 @@ def view_batch_results():
     controls_frame = ttk.Frame(results_tab, padding="10")
     controls_frame.pack(fill="x", padx=10, pady=5)
     
-    ttk.Label(controls_frame, text=f"Ranked by: {'Walk-Forward Score' if has_walk_forward else 'Backtest Score'}", 
+    ttk.Label(controls_frame, text=f"Ranked by: {'Combined Score' if has_walk_forward else 'Backtest Score'}", 
               font=("Arial", 10, "bold")).pack(side="left", padx=5)
     
     # Filter frame
@@ -2206,19 +2240,19 @@ def view_batch_results():
     
     # Define comprehensive columns
     if has_walk_forward:
-        columns = ("Rank", "Symbol", "Train_Score", "WF_Score", "Train_Return", "WF_Return", 
+        columns = ("Rank", "Symbol", "Combined_Score", "Train_Score", "WF_Score", "Train_Return", "WF_Return", 
                   "Train_WinRate", "WF_WinRate", "Train_Trades", "WF_Trades", "Train_DD", "WF_DD",
-                  "Train_HoldTime", "WF_HoldTime", "SMA_A", "SMA_B", "Segments")
-        column_names = ("Rank", "Symbol", "Train Score", "WF Score", "Train Return", "WF Return",
+                  "Train_HoldTime", "WF_HoldTime", "SMA_A", "SMA_B")
+        column_names = ("Rank", "Symbol", "Combined", "Train Score", "WF Score", "Train Return", "WF Return",
                        "Train WR", "WF WR", "Train #", "WF #", "Train DD", "WF DD",
-                       "Train Hold", "WF Hold", "SMA A", "SMA B", "Segments")
-        column_widths = (60, 80, 90, 90, 100, 100, 80, 80, 70, 70, 80, 80, 80, 80, 60, 60, 70)
+                       "Train Hold", "WF Hold", "SMA A", "SMA B")
+        column_widths = (60, 80, 90, 90, 90, 100, 100, 80, 80, 70, 70, 80, 80, 80, 80, 60, 60)
     else:
         columns = ("Rank", "Symbol", "Score", "Return", "Better_Off", "Win_Rate", "Trades", 
-                  "Wins", "Losses", "Max_DD", "Avg_Hold", "Avg_Trade", "End_Liquidity", "SMA_A", "SMA_B")
+                  "Wins", "Losses", "Max_DD", "Avg_Hold", "Avg_Trade", "SMA_A", "SMA_B")
         column_names = ("Rank", "Symbol", "Score", "Return", "Better Off", "Win Rate", "Trades",
-                       "Wins", "Losses", "Max DD", "Avg Hold", "Avg Trade", "End Liquidity", "SMA A", "SMA B")
-        column_widths = (60, 80, 90, 100, 90, 80, 70, 60, 60, 80, 80, 90, 110, 60, 60)
+                       "Wins", "Losses", "Max DD", "Avg Hold", "Avg Trade", "SMA A", "SMA B")
+        column_widths = (60, 80, 90, 100, 90, 80, 70, 60, 60, 80, 80, 90, 60, 60)
     
     tree_batch = ttk.Treeview(tree_container, columns=columns, show="headings", 
                               yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set,
@@ -2246,15 +2280,67 @@ def view_batch_results():
         if has_walk_forward and result.get("walk_forward_mode", False):
             training_metrics = result.get("training_metrics", {})
             wf_metrics = result.get("walk_forward_metrics", {})
-            training_score = result.get("training_score", 0.0)
-            wf_score = result.get("walk_forward_score", 0.0)
-            segments = result.get("segments", 0)
+            noalgoreturn = result.get("noalgoreturn", 0)
+            param_stability = result.get("param_stability", {})
             
-            output1 = result.get("outputresults1", {})
-            best_a = output1.get("besta", "")
-            best_b = output1.get("bestb", "")
+            
+            # Recalculate scores using current scoring_config to match Overview and All Combinations
+            training_result = {
+                "outputresults1": {
+                    "besttaxedreturn": training_metrics.get("taxed_return", 0),
+                    "betteroff": training_metrics.get("better_off", 0),
+                    "besttradecount": training_metrics.get("trade_count", 0),
+                    "noalgoreturn": noalgoreturn
+                },
+                "outputresults2": {
+                    "winningtradepct": training_metrics.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": training_metrics.get("max_drawdown", 0),
+                    "average_hold_time": training_metrics.get("avg_hold_time", 0)
+                },
+                "param_stability": param_stability
+            }
+            training_score = scoring.calculate_backtest_score(training_result, scoring_config)
+            
+            wf_result = {
+                "outputresults1": {
+                    "besttaxedreturn": wf_metrics.get("taxed_return", 0),
+                    "betteroff": 0.0,  # Walk-forward doesn't track better_off
+                    "besttradecount": wf_metrics.get("trade_count", 0),
+                    "noalgoreturn": 0.0
+                },
+                "outputresults2": {
+                    "winningtradepct": wf_metrics.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": wf_metrics.get("max_drawdown", 0),
+                    "average_hold_time": wf_metrics.get("avg_hold_time", 0)
+                },
+                "param_stability": {}  # Walk-forward doesn't have param stability
+            }
+            wf_score = scoring.calculate_backtest_score(wf_result, scoring_config)
+            
+            # Calculate combined score using configurable weights
+            combined_weighting = scoring_config.get("combined_score_weighting", {})
+            training_weight = combined_weighting.get("training_weight", 0.4)
+            wf_weight = combined_weighting.get("walk_forward_weight", 0.6)
+            combined_score = training_score * training_weight + wf_score * wf_weight
+            
+            
+            # Get best combination from all_combinations to match All Combinations tab
+            all_combinations = result.get("all_combinations", [])
+            best_idx = result.get("best_combination_idx", 0)
+            best_combo = all_combinations[best_idx] if all_combinations and best_idx < len(all_combinations) else None
+            
+            # Get SMA A/B from best combination (matching All Combinations tab)
+            if best_combo:
+                best_a = best_combo.get("sma_a", "")
+                best_b = best_combo.get("sma_b", "")
+            else:
+                # Fallback to outputresults1 if no combinations available
+                output1 = result.get("outputresults1", {})
+                best_a = output1.get("besta", "")
+                best_b = output1.get("bestb", "")
             
             data_entry.update({
+                "combined_score": combined_score,
                 "training_score": training_score,
                 "wf_score": wf_score,
                 "training_return": training_metrics.get("taxed_return", 0),
@@ -2269,8 +2355,7 @@ def view_batch_results():
                 "wf_holdtime": wf_metrics.get("avg_hold_time", 0),
                 "best_a": best_a,
                 "best_b": best_b,
-                "segments": segments,
-                "sort_key": wf_score
+                "sort_key": combined_score  # Sort by combined score to match All Combinations tab
             })
         else:
             score = scoring.calculate_backtest_score(result, scoring_config)
@@ -2297,8 +2382,11 @@ def view_batch_results():
         
         batch_data.append(data_entry)
     
-    # Sort by sort_key
+    # Sort by sort_key (combined_score for walk-forward, score for regular)
     batch_data.sort(key=lambda x: x["sort_key"], reverse=True)
+    if has_walk_forward:
+        if batch_data:
+            top_stock = batch_data[0]
     
     # Store batch_data for drill-down
     batch_data_store = batch_data.copy()
@@ -2323,6 +2411,7 @@ def view_batch_results():
                 values = (
                     rank,
                     data["symbol"],
+                    f"{data.get('combined_score', 0):.2f}",
                     f"{data.get('training_score', 0):.2f}",
                     f"{data.get('wf_score', 0):.2f}",
                     f"{data.get('training_return', 0):.2%}",
@@ -2336,8 +2425,7 @@ def view_batch_results():
                     f"{data.get('training_holdtime', 0):.1f}",
                     f"{data.get('wf_holdtime', 0):.1f}",
                     data.get("best_a", ""),
-                    data.get("best_b", ""),
-                    data.get("segments", 0)
+                    data.get("best_b", "")
                 )
             else:
                 values = (
@@ -2353,7 +2441,6 @@ def view_batch_results():
                     f"{data.get('max_drawdown', 0):.2%}",
                     f"{data.get('avg_hold_time', 0):.1f}",
                     f"{data.get('avg_trade_return', 0):.2%}",
-                    f"${data.get('end_liquidity', 0):,.2f}",
                     data.get("best_a", ""),
                     data.get("best_b", "")
                 )
@@ -2395,6 +2482,210 @@ def view_batch_results():
     status_label = ttk.Label(results_tab, text=status_text)
     status_label.pack(pady=5)
     
+    # ========== SCORE BREAKDOWN FUNCTION ==========
+    def show_score_breakdown(parent_window, score_type, result_data, scoring_config, title_prefix=""):
+        """Show a breakdown window explaining how a score was calculated."""
+        breakdown_window = tk.Toplevel(parent_window)
+        breakdown_window.title(f"{title_prefix}Score Breakdown: {score_type}")
+        breakdown_window.geometry("800x700")
+        
+        # Create result dict for scoring function
+        if score_type == "Training":
+            result_for_scoring = {
+                "outputresults1": {
+                    "besttaxedreturn": result_data.get("taxed_return", 0),
+                    "betteroff": result_data.get("better_off", 0),
+                    "besttradecount": result_data.get("trade_count", 0),
+                    "noalgoreturn": result_data.get("noalgoreturn", 0)
+                },
+                "outputresults2": {
+                    "winningtradepct": result_data.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": result_data.get("max_drawdown", 0),
+                    "average_hold_time": result_data.get("avg_hold_time", 0)
+                },
+                "param_stability": result_data.get("param_stability", {})
+            }
+        elif score_type == "Walk-Forward":
+            result_for_scoring = {
+                "outputresults1": {
+                    "besttaxedreturn": result_data.get("taxed_return", 0),
+                    "betteroff": 0.0,
+                    "besttradecount": result_data.get("trade_count", 0),
+                    "noalgoreturn": 0.0
+                },
+                "outputresults2": {
+                    "winningtradepct": result_data.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": result_data.get("max_drawdown", 0),
+                    "average_hold_time": result_data.get("avg_hold_time", 0)
+                },
+                "param_stability": {}
+            }
+        else:  # Regular backtest or Combined
+            result_for_scoring = result_data
+        
+        # Get breakdown
+        breakdown_data = scoring.calculate_backtest_score_breakdown(result_for_scoring, scoring_config)
+        
+        # Header
+        header_frame = ttk.Frame(breakdown_window, padding="10")
+        header_frame.pack(fill="x")
+        ttk.Label(header_frame, text=f"{score_type} Score Breakdown", font=("Arial", 14, "bold")).pack()
+        ttk.Label(header_frame, text=f"Total Score: {breakdown_data['total_score']:.2f}/10.0", 
+                 font=("Arial", 12, "bold"), foreground="blue").pack(pady=5)
+        
+        # Scrollable breakdown
+        canvas = tk.Canvas(breakdown_window)
+        scrollbar = ttk.Scrollbar(breakdown_window, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Display breakdown items
+        for i, item in enumerate(breakdown_data["breakdown"]):
+            item_frame = ttk.LabelFrame(scrollable_frame, text=item["metric"], padding="10")
+            item_frame.pack(fill="x", padx=10, pady=5)
+            
+            # Raw value and contribution
+            ttk.Label(item_frame, text=f"Value: {item['raw_display']}", font=("Arial", 10)).grid(row=0, column=0, sticky="w", padx=5)
+            ttk.Label(item_frame, text=f"Contribution: {item['contribution']:.3f} pts", 
+                     font=("Arial", 10, "bold"), foreground="green").grid(row=0, column=1, sticky="e", padx=5)
+            
+            # Explanation
+            ttk.Label(item_frame, text=item["explanation"], font=("Arial", 9), 
+                     foreground="gray", wraplength=700).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        
+        # Total at bottom
+        total_frame = ttk.Frame(scrollable_frame, padding="10")
+        total_frame.pack(fill="x", padx=10, pady=10)
+        ttk.Label(total_frame, text="────────────────────────────────────", 
+                 font=("Arial", 10)).pack()
+        ttk.Label(total_frame, text=f"Sum of Contributions: {breakdown_data['total_contribution']:.3f}", 
+                 font=("Arial", 10, "bold")).pack(pady=5)
+        ttk.Label(total_frame, 
+                 text=f"Normalized to 0-10: ({breakdown_data['total_contribution']:.3f} ÷ {breakdown_data['weight_sum']:.2f}) × 10.0 = {breakdown_data['total_score']:.2f}", 
+                 font=("Arial", 9), foreground="gray").pack()
+    
+    def show_combined_score_breakdown(parent_window, combined_score, training_score, wf_score,
+                                      training_weight, wf_weight, training_metrics, wf_metrics,
+                                      noalgoreturn, param_stability, scoring_config, symbol):
+        """Show breakdown for combined score (training + walk-forward)."""
+        breakdown_window = tk.Toplevel(parent_window)
+        breakdown_window.title(f"{symbol} - Combined Score Breakdown")
+        breakdown_window.geometry("900x800")
+        
+        # Header
+        header_frame = ttk.Frame(breakdown_window, padding="10")
+        header_frame.pack(fill="x")
+        ttk.Label(header_frame, text="Combined Score Breakdown", font=("Arial", 14, "bold")).pack()
+        ttk.Label(header_frame, text=f"Total Combined Score: {combined_score:.2f}/10.0", 
+                 font=("Arial", 12, "bold"), foreground="blue").pack(pady=5)
+        ttk.Label(header_frame, 
+                 text=f"Formula: Training Score × {training_weight:.0%} + Walk-Forward Score × {wf_weight:.0%}",
+                 font=("Arial", 10), foreground="gray").pack()
+        
+        # Create notebook for training and WF breakdowns
+        notebook = ttk.Notebook(breakdown_window)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Training breakdown tab
+        training_score_display = f"{training_score:.2f}" if training_score is not None else "N/A"
+        training_tab = ttk.Frame(notebook)
+        notebook.add(training_tab, text=f"Training Score ({training_score_display})")
+        
+        training_result = {
+            "outputresults1": {
+                "besttaxedreturn": training_metrics.get("taxed_return", 0),
+                "betteroff": training_metrics.get("better_off", 0),
+                "besttradecount": training_metrics.get("trade_count", 0),
+                "noalgoreturn": noalgoreturn
+            },
+            "outputresults2": {
+                "winningtradepct": training_metrics.get("win_rate", 0),
+                "maxdrawdown(worst trade return pct)": training_metrics.get("max_drawdown", 0),
+                "average_hold_time": training_metrics.get("avg_hold_time", 0)
+            },
+            "param_stability": param_stability
+        }
+        training_breakdown = scoring.calculate_backtest_score_breakdown(training_result, scoring_config)
+        
+        training_canvas = tk.Canvas(training_tab)
+        training_scrollbar = ttk.Scrollbar(training_tab, orient="vertical", command=training_canvas.yview)
+        training_frame = ttk.Frame(training_canvas)
+        training_frame.bind("<Configure>", lambda e: training_canvas.configure(scrollregion=training_canvas.bbox("all")))
+        training_canvas.create_window((0, 0), window=training_frame, anchor="nw")
+        training_canvas.configure(yscrollcommand=training_scrollbar.set)
+        training_canvas.pack(side="left", fill="both", expand=True)
+        training_scrollbar.pack(side="right", fill="y")
+        
+        for item in training_breakdown["breakdown"]:
+            item_frame = ttk.LabelFrame(training_frame, text=item["metric"], padding="10")
+            item_frame.pack(fill="x", padx=10, pady=5)
+            ttk.Label(item_frame, text=f"Value: {item['raw_display']}", font=("Arial", 10)).grid(row=0, column=0, sticky="w", padx=5)
+            ttk.Label(item_frame, text=f"Contribution: {item['contribution']:.3f} pts", 
+                     font=("Arial", 10, "bold"), foreground="green").grid(row=0, column=1, sticky="e", padx=5)
+            ttk.Label(item_frame, text=item["explanation"], font=("Arial", 9), 
+                     foreground="gray", wraplength=700).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        
+        # Walk-forward breakdown tab (only if wf_score is not None)
+        if wf_score is not None:
+            wf_score_display = f"{wf_score:.2f}"
+            wf_tab = ttk.Frame(notebook)
+            notebook.add(wf_tab, text=f"Walk-Forward Score ({wf_score_display})")
+            
+            wf_result = {
+                "outputresults1": {
+                    "besttaxedreturn": wf_metrics.get("taxed_return", 0),
+                    "betteroff": 0.0,
+                    "besttradecount": wf_metrics.get("trade_count", 0),
+                    "noalgoreturn": 0.0
+                },
+                "outputresults2": {
+                    "winningtradepct": wf_metrics.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": wf_metrics.get("max_drawdown", 0),
+                    "average_hold_time": wf_metrics.get("avg_hold_time", 0)
+                },
+                "param_stability": {}
+            }
+            wf_breakdown = scoring.calculate_backtest_score_breakdown(wf_result, scoring_config)
+            
+            wf_canvas = tk.Canvas(wf_tab)
+            wf_scrollbar = ttk.Scrollbar(wf_tab, orient="vertical", command=wf_canvas.yview)
+            wf_frame = ttk.Frame(wf_canvas)
+            wf_frame.bind("<Configure>", lambda e: wf_canvas.configure(scrollregion=wf_canvas.bbox("all")))
+            wf_canvas.create_window((0, 0), window=wf_frame, anchor="nw")
+            wf_canvas.configure(yscrollcommand=wf_scrollbar.set)
+            wf_canvas.pack(side="left", fill="both", expand=True)
+            wf_scrollbar.pack(side="right", fill="y")
+            
+            for item in wf_breakdown["breakdown"]:
+                item_frame = ttk.LabelFrame(wf_frame, text=item["metric"], padding="10")
+                item_frame.pack(fill="x", padx=10, pady=5)
+                ttk.Label(item_frame, text=f"Value: {item['raw_display']}", font=("Arial", 10)).grid(row=0, column=0, sticky="w", padx=5)
+                ttk.Label(item_frame, text=f"Contribution: {item['contribution']:.3f} pts", 
+                         font=("Arial", 10, "bold"), foreground="green").grid(row=0, column=1, sticky="e", padx=5)
+                ttk.Label(item_frame, text=item["explanation"], font=("Arial", 9), 
+                         foreground="gray", wraplength=700).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        
+        # Combined calculation summary
+        summary_frame = ttk.Frame(breakdown_window, padding="10")
+        summary_frame.pack(fill="x")
+        ttk.Label(summary_frame, text="────────────────────────────────────", font=("Arial", 10)).pack()
+        if wf_score is not None:
+            combined_formula = f"Combined: {training_score:.2f} × {training_weight:.0%} + {wf_score:.2f} × {wf_weight:.0%} = {combined_score:.2f}"
+        else:
+            combined_formula = f"Combined: {training_score:.2f} (no walk-forward score available)"
+        ttk.Label(summary_frame, text=combined_formula,
+                 font=("Arial", 11, "bold"), foreground="blue").pack(pady=5)
+    
     # ========== DETAIL VIEW FUNCTION ==========
     def show_stock_detail(parent_window, stock_data, has_wf):
         """Show detailed view for a single stock."""
@@ -2422,10 +2713,61 @@ def view_batch_results():
         if has_wf and result.get("walk_forward_mode", False):
             training_metrics = result.get("training_metrics", {})
             wf_metrics = result.get("walk_forward_metrics", {})
+            noalgoreturn = result.get("noalgoreturn", 0)
+            param_stability = result.get("param_stability", {})
+            
+            
+            # Recalculate scores using current scoring_config to ensure consistency with All Combinations and rescoring
+            # Training score calculation (using training_metrics which are for the best combination)
+            training_result = {
+                "outputresults1": {
+                    "besttaxedreturn": training_metrics.get("taxed_return", 0),
+                    "betteroff": training_metrics.get("better_off", 0),
+                    "besttradecount": training_metrics.get("trade_count", 0),
+                    "noalgoreturn": noalgoreturn
+                },
+                "outputresults2": {
+                    "winningtradepct": training_metrics.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": training_metrics.get("max_drawdown", 0),
+                    "average_hold_time": training_metrics.get("avg_hold_time", 0)
+                },
+                "param_stability": param_stability
+            }
+            training_score = scoring.calculate_backtest_score(training_result, scoring_config)
+            
+            # Walk-forward score calculation
+            wf_result = {
+                "outputresults1": {
+                    "besttaxedreturn": wf_metrics.get("taxed_return", 0),
+                    "betteroff": 0.0,  # Walk-forward doesn't track better_off
+                    "besttradecount": wf_metrics.get("trade_count", 0),
+                    "noalgoreturn": 0.0
+                },
+                "outputresults2": {
+                    "winningtradepct": wf_metrics.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": wf_metrics.get("max_drawdown", 0),
+                    "average_hold_time": wf_metrics.get("avg_hold_time", 0)
+                },
+                "param_stability": {}  # Walk-forward doesn't have param stability
+            }
+            walk_forward_score = scoring.calculate_backtest_score(wf_result, scoring_config)
+            
+            # Calculate combined score using configurable weights
+            combined_weighting = scoring_config.get("combined_score_weighting", {})
+            training_weight = combined_weighting.get("training_weight", 0.4)
+            wf_weight = combined_weighting.get("walk_forward_weight", 0.6)
+            combined_score = training_score * training_weight + walk_forward_score * wf_weight
             
             # Training metrics
             ttk.Label(metrics_grid, text="TRAINING PERIOD", font=("Arial", 11, "bold")).grid(row=0, column=0, columnspan=3, pady=10, sticky="w")
-            ttk.Label(metrics_grid, text=f"Score: {result.get('training_score', 0):.2f}/10.0").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+            training_score_label = ttk.Label(metrics_grid, text=f"Score: {training_score:.2f}/10.0", 
+                                            cursor="hand2", foreground="blue", font=("Arial", 10, "underline"))
+            training_score_label.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+            training_score_label.bind("<Button-1>", lambda e: show_score_breakdown(
+                detail_window, "Training", 
+                {**training_metrics, "noalgoreturn": noalgoreturn, "param_stability": param_stability},
+                scoring_config, f"{stock_data['symbol']} - "
+            ))
             ttk.Label(metrics_grid, text=f"Return: {training_metrics.get('taxed_return', 0):.2%}").grid(row=1, column=1, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Win Rate: {training_metrics.get('win_rate', 0):.2%}").grid(row=1, column=2, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Trades: {training_metrics.get('trade_count', 0)}").grid(row=2, column=0, padx=10, pady=5, sticky="w")
@@ -2434,7 +2776,14 @@ def view_batch_results():
             
             # Walk-forward metrics
             ttk.Label(metrics_grid, text="WALK-FORWARD PERIOD", font=("Arial", 11, "bold")).grid(row=3, column=0, columnspan=3, pady=(20, 10), sticky="w")
-            ttk.Label(metrics_grid, text=f"Score: {result.get('walk_forward_score', 0):.2f}/10.0").grid(row=4, column=0, padx=10, pady=5, sticky="w")
+            wf_score_label = ttk.Label(metrics_grid, text=f"Score: {walk_forward_score:.2f}/10.0",
+                                      cursor="hand2", foreground="blue", font=("Arial", 10, "underline"))
+            wf_score_label.grid(row=4, column=0, padx=10, pady=5, sticky="w")
+            wf_score_label.bind("<Button-1>", lambda e: show_score_breakdown(
+                detail_window, "Walk-Forward",
+                {**wf_metrics, "noalgoreturn": 0, "param_stability": {}},
+                scoring_config, f"{stock_data['symbol']} - "
+            ))
             ttk.Label(metrics_grid, text=f"Return: {wf_metrics.get('taxed_return', 0):.2%}").grid(row=4, column=1, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Win Rate: {wf_metrics.get('win_rate', 0):.2%}").grid(row=4, column=2, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Trades: {wf_metrics.get('trade_count', 0)}").grid(row=5, column=0, padx=10, pady=5, sticky="w")
@@ -2442,7 +2791,31 @@ def view_batch_results():
             ttk.Label(metrics_grid, text=f"Losses: {wf_metrics.get('losing_trades', 0)}").grid(row=5, column=2, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Max DD: {wf_metrics.get('max_drawdown', 0):.2%}").grid(row=6, column=0, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Avg Hold: {wf_metrics.get('avg_hold_time', 0):.1f} days").grid(row=6, column=1, padx=10, pady=5, sticky="w")
-            ttk.Label(metrics_grid, text=f"Segments: {result.get('segments', 0)}").grid(row=6, column=2, padx=10, pady=5, sticky="w")
+            
+            # Combined score display
+            ttk.Label(metrics_grid, text="COMBINED SCORE", font=("Arial", 11, "bold")).grid(row=7, column=0, columnspan=3, pady=(20, 10), sticky="w")
+            combined_score_text = f"Combined Score: {combined_score:.2f}/10.0 ({training_weight*100:.0f}% Training + {wf_weight*100:.0f}% WF)"
+            combined_score_label = ttk.Label(metrics_grid, text=combined_score_text,
+                                            cursor="hand2", foreground="blue", font=("Arial", 10, "bold", "underline"))
+            combined_score_label.grid(row=8, column=0, columnspan=3, padx=10, pady=5, sticky="w")
+            combined_score_label.bind("<Button-1>", lambda e: show_combined_score_breakdown(
+                detail_window, combined_score, training_score, walk_forward_score,
+                training_weight, wf_weight, training_metrics, wf_metrics,
+                noalgoreturn, param_stability, scoring_config, stock_data['symbol']
+            ))
+            
+            # Best SMA combination (matching All Combinations and Ranked Results)
+            all_combinations = result.get("all_combinations", [])
+            best_idx = result.get("best_combination_idx", 0)
+            best_combo = all_combinations[best_idx] if all_combinations and best_idx < len(all_combinations) else None
+            if best_combo:
+                best_sma_a = best_combo.get("sma_a", "")
+                best_sma_b = best_combo.get("sma_b", "")
+            else:
+                output1 = result.get("outputresults1", {})
+                best_sma_a = output1.get("besta", "")
+                best_sma_b = output1.get("bestb", "")
+            ttk.Label(metrics_grid, text=f"Best SMA: {best_sma_a}/{best_sma_b}").grid(row=9, column=0, padx=10, pady=5, sticky="w")
         else:
             output1 = result.get("outputresults1", {})
             output2 = result.get("outputresults2", {})
@@ -2456,11 +2829,20 @@ def view_batch_results():
             ttk.Label(metrics_grid, text=f"Max Drawdown: {output2.get('maxdrawdown(worst trade return pct)', 0):.2%}").grid(row=2, column=1, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Avg Hold Time: {output2.get('average_hold_time', 0):.1f} days").grid(row=2, column=2, padx=10, pady=5, sticky="w")
             ttk.Label(metrics_grid, text=f"Best SMA: {output1.get('besta', '')}/{output1.get('bestb', '')}").grid(row=3, column=0, padx=10, pady=5, sticky="w")
-            ttk.Label(metrics_grid, text=f"End Liquidity: ${output2.get('bestendtaxed_liquidity', 0):,.2f}").grid(row=3, column=1, padx=10, pady=5, sticky="w")
         
         # Combinations tab (similar to view_cached_backtests)
         combos_tab = ttk.Frame(detail_notebook)
         detail_notebook.add(combos_tab, text="All Combinations")
+        
+        # Check if walk-forward mode
+        is_walk_forward = result.get("walk_forward_mode", False)
+        training_metrics = result.get("training_metrics", {}) if is_walk_forward else {}
+        walk_forward_metrics = result.get("walk_forward_metrics", {}) if is_walk_forward else {}
+        
+        # Get combined score weighting from config
+        combined_weighting = scoring_config.get("combined_score_weighting", {})
+        training_weight = combined_weighting.get("training_weight", 0.4)
+        wf_weight = combined_weighting.get("walk_forward_weight", 0.6)
         
         # Tree for combinations
         combos_tree_frame = ttk.Frame(combos_tab)
@@ -2471,16 +2853,28 @@ def view_batch_results():
         combos_scroll_x = ttk.Scrollbar(combos_tree_frame, orient="horizontal")
         combos_scroll_x.pack(side="bottom", fill="x")
         
-        combos_columns = ("Backtest_Score", "SMA_A", "SMA_B", "Taxed_Return", "Better_Off", "Win_Rate", 
-                         "Trade_Count", "Winning_Trades", "Losing_Trades", "Max_Drawdown", "Avg_Hold_Time", 
-                         "Avg_Trade_Return", "Return_Std", "End_Liquidity", "Under1Y_PL", "Over1Y_PL", "Win_Pct_Last4")
+        # Add Combined_Score column if walk-forward mode
+        if is_walk_forward:
+            combos_columns = ("Combined_Score", "Train_Score", "WF_Score", "SMA_A", "SMA_B", "Taxed_Return", "Better_Off", "Win_Rate", 
+                             "Trade_Count", "Winning_Trades", "Losing_Trades", "Max_Drawdown", "Avg_Hold_Time", 
+                             "Avg_Trade_Return", "Return_Std", "Win_Pct_Last4")
+        else:
+            combos_columns = ("Backtest_Score", "SMA_A", "SMA_B", "Taxed_Return", "Better_Off", "Win_Rate", 
+                             "Trade_Count", "Winning_Trades", "Losing_Trades", "Max_Drawdown", "Avg_Hold_Time", 
+                             "Avg_Trade_Return", "Return_Std", "Win_Pct_Last4")
+        
         combos_tree = ttk.Treeview(combos_tree_frame, columns=combos_columns, show="headings",
                                    yscrollcommand=combos_scroll_y.set, xscrollcommand=combos_scroll_x.set)
         combos_scroll_y.config(command=combos_tree.yview)
         combos_scroll_x.config(command=combos_tree.xview)
         
         # Configure columns
-        combos_tree.heading("Backtest_Score", text="Score")
+        if is_walk_forward:
+            combos_tree.heading("Combined_Score", text="Combined Score (click)")
+            combos_tree.heading("Train_Score", text="Train Score (click)")
+            combos_tree.heading("WF_Score", text="WF Score (click)")
+        else:
+            combos_tree.heading("Backtest_Score", text="Score (click)")
         combos_tree.heading("SMA_A", text="SMA A")
         combos_tree.heading("SMA_B", text="SMA B")
         combos_tree.heading("Taxed_Return", text="Return")
@@ -2493,9 +2887,6 @@ def view_batch_results():
         combos_tree.heading("Avg_Hold_Time", text="Avg Hold")
         combos_tree.heading("Avg_Trade_Return", text="Avg Trade")
         combos_tree.heading("Return_Std", text="Return Std")
-        combos_tree.heading("End_Liquidity", text="End Liquidity")
-        combos_tree.heading("Under1Y_PL", text="Under 1Y P/L")
-        combos_tree.heading("Over1Y_PL", text="Over 1Y P/L")
         combos_tree.heading("Win_Pct_Last4", text="Win % Last 4")
         
         # Set column widths
@@ -2513,51 +2904,166 @@ def view_batch_results():
         if all_combinations:
             # Score and sort combinations
             combo_scores = []
-            for combo in all_combinations:
-                combo_result = {
-                    "outputresults1": {
-                        "besttaxedreturn": combo.get("taxed_return", 0),
-                        "betteroff": combo.get("better_off", 0),
-                        "besttradecount": combo.get("trade_count", 0),
-                        "noalgoreturn": noalgoreturn
-                    },
-                    "outputresults2": {
-                        "winningtradepct": combo.get("win_rate", 0),
-                        "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
-                        "average_hold_time": combo.get("avg_hold_time", 0)
-                    },
-                    "param_stability": param_stability
-                }
-                backtest_score = scoring.calculate_backtest_score(combo_result, scoring_config)
-                combo_scores.append((combo, backtest_score))
             
-            # Sort by score
-            combo_scores.sort(key=lambda x: x[1], reverse=True)
+            for combo_idx, combo in enumerate(all_combinations):
+                if is_walk_forward:
+                    is_best = (combo_idx == best_idx)
+                    
+                    # For walk-forward, each combination has its own training metrics
+                    # Use the combination's own metrics for training score
+                    combo_training_return = combo.get("taxed_return", 0)
+                    combo_training_winrate = combo.get("win_rate", 0)
+                    combo_training_trades = combo.get("trade_count", 0)
+                    
+                    
+                    training_combo_result = {
+                        "outputresults1": {
+                            "besttaxedreturn": combo_training_return,
+                            "betteroff": combo.get("better_off", 0),
+                            "besttradecount": combo_training_trades,
+                            "noalgoreturn": noalgoreturn
+                        },
+                        "outputresults2": {
+                            "winningtradepct": combo_training_winrate,
+                            "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
+                            "average_hold_time": combo.get("avg_hold_time", 0)
+                        },
+                        "param_stability": param_stability
+                    }
+                    training_score = scoring.calculate_backtest_score(training_combo_result, scoring_config)
+                    
+                    # Walk-forward score: Only the best combination (tested one) has walk-forward data
+                    # For the best combination, use result-level walk_forward_metrics to match Overview tab
+                    # This ensures consistency: Overview shows scores for best combo, All Combinations should match
+                    if is_best:
+                        # Use result-level walk_forward_metrics (which are for the best combination)
+                        wf_combo_result = {
+                            "outputresults1": {
+                                "besttaxedreturn": walk_forward_metrics.get("taxed_return", 0),
+                                "betteroff": 0.0,  # Walk-forward doesn't track better_off
+                                "besttradecount": walk_forward_metrics.get("trade_count", 0),
+                                "noalgoreturn": 0.0
+                            },
+                            "outputresults2": {
+                                "winningtradepct": walk_forward_metrics.get("win_rate", 0),
+                                "maxdrawdown(worst trade return pct)": walk_forward_metrics.get("max_drawdown", 0),
+                                "average_hold_time": walk_forward_metrics.get("avg_hold_time", 0)
+                            },
+                            "param_stability": {}  # Walk-forward doesn't have param stability
+                        }
+                        walk_forward_score = scoring.calculate_backtest_score(wf_combo_result, scoring_config)
+                        
+                        # For best combination, also use result-level training_metrics to ensure training_score matches Overview
+                        # This ensures the training score for the best combo matches what's shown in Overview
+                        result_training_return = training_metrics.get("taxed_return", 0)
+                        result_training_winrate = training_metrics.get("win_rate", 0)
+                        result_training_trades = training_metrics.get("trade_count", 0)
+                        
+                        best_training_combo_result = {
+                            "outputresults1": {
+                                "besttaxedreturn": result_training_return,
+                                "betteroff": training_metrics.get("better_off", 0),
+                                "besttradecount": result_training_trades,
+                                "noalgoreturn": noalgoreturn
+                            },
+                            "outputresults2": {
+                                "winningtradepct": result_training_winrate,
+                                "maxdrawdown(worst trade return pct)": training_metrics.get("max_drawdown", 0),
+                                "average_hold_time": training_metrics.get("avg_hold_time", 0)
+                            },
+                            "param_stability": param_stability
+                        }
+                        training_score = scoring.calculate_backtest_score(best_training_combo_result, scoring_config)
+                    else:
+                        # Other combinations weren't tested in walk-forward, so no walk-forward score
+                        walk_forward_score = None
+                    
+                    # Calculate combined score using configurable weights
+                    # If no walk-forward score, use only training score (or set combined to training score)
+                    if walk_forward_score is not None:
+                        combined_score = training_score * training_weight + walk_forward_score * wf_weight
+                    else:
+                        # For combinations without walk-forward data, combined score = training score only
+                        combined_score = training_score
+                    
+                    combo_scores.append((combo, training_score, walk_forward_score, combined_score))
+                else:
+                    # Regular backtest - just calculate single score
+                    combo_result = {
+                        "outputresults1": {
+                            "besttaxedreturn": combo.get("taxed_return", 0),
+                            "betteroff": combo.get("better_off", 0),
+                            "besttradecount": combo.get("trade_count", 0),
+                            "noalgoreturn": noalgoreturn
+                        },
+                        "outputresults2": {
+                            "winningtradepct": combo.get("win_rate", 0),
+                            "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
+                            "average_hold_time": combo.get("avg_hold_time", 0)
+                        },
+                        "param_stability": param_stability
+                    }
+                    backtest_score = scoring.calculate_backtest_score(combo_result, scoring_config)
+                    combo_scores.append((combo, backtest_score))
+            
+            # Sort by combined score (walk-forward) or backtest score (regular)
+            if is_walk_forward:
+                combo_scores.sort(key=lambda x: x[3], reverse=True)  # Sort by combined_score (index 3)
+                if combo_scores:
+                    top_combo = combo_scores[0]
+            else:
+                combo_scores.sort(key=lambda x: x[1], reverse=True)  # Sort by backtest_score (index 1)
             
             # Populate tree
-            for i, (combo, score) in enumerate(combo_scores):
+            for i, score_data in enumerate(combo_scores):
+                if is_walk_forward:
+                    combo, training_score, walk_forward_score, combined_score = score_data
+                    sort_score = combined_score
+                else:
+                    combo, backtest_score = score_data
+                    sort_score = backtest_score
+                
                 win_pct_last4 = combo.get("win_pct_last_4", None)
                 win_pct_last4_str = f"{win_pct_last4:.2%}" if win_pct_last4 is not None else "N/A"
                 
-                values = (
-                    f"{score:.2f}",
-                    combo.get('sma_a', ''),
-                    combo.get('sma_b', ''),
-                    f"{combo.get('taxed_return', 0):.4%}",
-                    f"{combo.get('better_off', 0):.4%}",
-                    f"{combo.get('win_rate', 0):.2%}",
-                    combo.get('trade_count', 0),
-                    combo.get('winning_trades', 0),
-                    combo.get('losing_trades', 0),
-                    f"{combo.get('max_drawdown', 0):.4%}",
-                    f"{combo.get('avg_hold_time', 0):.1f}",
-                    f"{combo.get('avg_trade_return', 0):.4%}",
-                    f"{combo.get('return_std', 0):.4f}",
-                    f"${combo.get('end_taxed_liquidity', 0):,.2f}",
-                    f"${combo.get('under1yearpl', 0):,.2f}",
-                    f"${combo.get('over1yearpl', 0):,.2f}",
-                    win_pct_last4_str
-                )
+                if is_walk_forward:
+                    # Format walk-forward score (show N/A if not tested)
+                    wf_score_str = f"{walk_forward_score:.2f}" if walk_forward_score is not None else "N/A"
+                    values = (
+                        f"{combined_score:.2f}",
+                        f"{training_score:.2f}",
+                        wf_score_str,
+                        combo.get('sma_a', ''),
+                        combo.get('sma_b', ''),
+                        f"{combo.get('taxed_return', 0):.4%}",
+                        f"{combo.get('better_off', 0):.4%}",
+                        f"{combo.get('win_rate', 0):.2%}",
+                        combo.get('trade_count', 0),
+                        combo.get('winning_trades', 0),
+                        combo.get('losing_trades', 0),
+                        f"{combo.get('max_drawdown', 0):.4%}",
+                        f"{combo.get('avg_hold_time', 0):.1f}",
+                        f"{combo.get('avg_trade_return', 0):.4%}",
+                        f"{combo.get('return_std', 0):.4f}",
+                        win_pct_last4_str
+                    )
+                else:
+                    values = (
+                        f"{backtest_score:.2f}",
+                        combo.get('sma_a', ''),
+                        combo.get('sma_b', ''),
+                        f"{combo.get('taxed_return', 0):.4%}",
+                        f"{combo.get('better_off', 0):.4%}",
+                        f"{combo.get('win_rate', 0):.2%}",
+                        combo.get('trade_count', 0),
+                        combo.get('winning_trades', 0),
+                        combo.get('losing_trades', 0),
+                        f"{combo.get('max_drawdown', 0):.4%}",
+                        f"{combo.get('avg_hold_time', 0):.1f}",
+                        f"{combo.get('avg_trade_return', 0):.4%}",
+                        f"{combo.get('return_std', 0):.4f}",
+                        win_pct_last4_str
+                    )
                 
                 tags = []
                 if combo == all_combinations[best_idx]:
@@ -2582,12 +3088,21 @@ def view_batch_results():
                 item = selection[0]
                 values = combos_tree.item(item, "values")
                 if values:
-                    # Find the combo by SMA_A and SMA_B (columns 1 and 2)
-                    sma_a = values[1]
-                    sma_b = values[2]
+                    # Find the combo by SMA_A and SMA_B
+                    # Column indices differ for walk-forward vs regular
+                    if is_walk_forward:
+                        sma_a = values[3]  # Combined_Score, Train_Score, WF_Score, then SMA_A
+                        sma_b = values[4]
+                    else:
+                        sma_a = values[1]  # Backtest_Score, then SMA_A
+                        sma_b = values[2]
                     # Find matching combo in stored scores
                     selected_combo = None
-                    for combo, score in combo_scores_store:
+                    for score_data in combo_scores_store:
+                        if is_walk_forward:
+                            combo = score_data[0]  # (combo, training_score, wf_score, combined_score)
+                        else:
+                            combo = score_data[0]  # (combo, backtest_score)
                         if str(combo.get('sma_a', '')) == sma_a and str(combo.get('sma_b', '')) == sma_b:
                             selected_combo = combo
                             break
@@ -2596,8 +3111,85 @@ def view_batch_results():
             
             combos_tree.bind("<Double-1>", on_combo_double_click)
             
+            # Add click handler for score columns in All Combinations (click on cells)
+            def on_combo_score_click(event):
+                """Handle clicks on score cells to show breakdown."""
+                region = combos_tree.identify_region(event.x, event.y)
+                if region == "cell":
+                    column = combos_tree.identify_column(event.x, event.y)
+                    column_name = combos_tree.heading(column)["text"]
+                    item = combos_tree.identify_row(event.y)
+                    
+                    # Check if it's a score column
+                    if item and column_name in ["Combined Score", "Train Score", "WF Score", "Score"]:
+                        values = combos_tree.item(item, "values")
+                        
+                        # Find the combo by SMA values
+                        if is_walk_forward:
+                            sma_a = values[3]  # Combined_Score, Train_Score, WF_Score, then SMA_A
+                            sma_b = values[4]
+                        else:
+                            sma_a = values[1]  # Backtest_Score, then SMA_A
+                            sma_b = values[2]
+                        
+                        # Find matching combo in combo_scores
+                        for score_data in combo_scores:
+                            if is_walk_forward:
+                                combo, training_score, wf_score, combined_score = score_data
+                            else:
+                                combo, backtest_score = score_data
+                            
+                            if str(combo.get('sma_a', '')) == sma_a and str(combo.get('sma_b', '')) == sma_b:
+                                combo_idx = all_combinations.index(combo) if combo in all_combinations else -1
+                                
+                                if column_name == "Combined Score" and is_walk_forward:
+                                    if combo_idx == best_idx:
+                                        show_combined_score_breakdown(
+                                            detail_window, combined_score, training_score, wf_score,
+                                            training_weight, wf_weight, training_metrics, walk_forward_metrics,
+                                            noalgoreturn, param_stability, scoring_config, stock_data['symbol']
+                                        )
+                                elif column_name == "Train Score" and is_walk_forward:
+                                    if combo_idx == best_idx:
+                                        combo_data = {**training_metrics, "noalgoreturn": noalgoreturn, "param_stability": param_stability}
+                                    else:
+                                        combo_data = {**combo, "noalgoreturn": noalgoreturn, "param_stability": param_stability}
+                                    show_score_breakdown(
+                                        detail_window, "Training", combo_data,
+                                        scoring_config, f"{stock_data['symbol']} - "
+                                    )
+                                elif column_name == "WF Score" and is_walk_forward:
+                                    if combo_idx == best_idx:
+                                        combo_data = {**walk_forward_metrics, "noalgoreturn": 0, "param_stability": {}}
+                                        show_score_breakdown(
+                                            detail_window, "Walk-Forward", combo_data,
+                                            scoring_config, f"{stock_data['symbol']} - "
+                                        )
+                                elif column_name == "Score" and not is_walk_forward:
+                                    combo_result = {
+                                        "outputresults1": {
+                                            "besttaxedreturn": combo.get("taxed_return", 0),
+                                            "betteroff": combo.get("better_off", 0),
+                                            "besttradecount": combo.get("trade_count", 0),
+                                            "noalgoreturn": noalgoreturn
+                                        },
+                                        "outputresults2": {
+                                            "winningtradepct": combo.get("win_rate", 0),
+                                            "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
+                                            "average_hold_time": combo.get("avg_hold_time", 0)
+                                        },
+                                        "param_stability": param_stability
+                                    }
+                                    show_score_breakdown(
+                                        detail_window, "Backtest", combo_result,
+                                        scoring_config, f"{stock_data['symbol']} - "
+                                    )
+                                break
+            
+            combos_tree.bind("<Button-1>", on_combo_score_click)
+            
             # Status label
-            status_text = f"Double-click a row to view detailed analysis | Showing {len(combo_scores)} combinations"
+            status_text = f"Double-click a row to view detailed analysis | Click score columns for breakdown | Showing {len(combo_scores)} combinations"
             combo_status_label = ttk.Label(combos_tab, text=status_text)
             combo_status_label.pack(pady=5)
         else:
@@ -2668,15 +3260,10 @@ def view_batch_results():
             row += 1
             
             ttk.Label(metrics_grid, text=f"Return Std Dev: {combo.get('return_std', 0):.4f}").grid(row=row, column=0, padx=10, pady=5, sticky="w")
-            ttk.Label(metrics_grid, text=f"End Liquidity: ${combo.get('end_taxed_liquidity', 0):,.2f}").grid(row=row, column=1, padx=10, pady=5, sticky="w")
             win_pct_last4 = combo.get('win_pct_last_4', None)
             win_pct_str = f"{win_pct_last4:.2%}" if win_pct_last4 is not None else "N/A"
-            ttk.Label(metrics_grid, text=f"Win % Last 4: {win_pct_str}").grid(row=row, column=2, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"Win % Last 4: {win_pct_str}").grid(row=row, column=1, padx=10, pady=5, sticky="w")
             row += 1
-            
-            if combo.get('under1yearpl') is not None or combo.get('over1yearpl') is not None:
-                ttk.Label(metrics_grid, text=f"Under 1Y P/L: ${combo.get('under1yearpl', 0):,.2f}").grid(row=row, column=0, padx=10, pady=5, sticky="w")
-                ttk.Label(metrics_grid, text=f"Over 1Y P/L: ${combo.get('over1yearpl', 0):,.2f}").grid(row=row, column=1, padx=10, pady=5, sticky="w")
             
             # Trades tab
             trades_tab = ttk.Frame(combo_notebook)
@@ -2748,7 +3335,7 @@ def view_batch_results():
                             'SellDate': sell_date,
                             'BuyPrice': f"{buy_price:.2f}" if isinstance(buy_price, (int, float)) else str(buy_price),
                             'SellPrice': f"{sell_price:.2f}" if isinstance(sell_price, (int, float)) else str(sell_price),
-                            'PreTaxReturn': f"{trade.get('PreTaxReturn', trade.get('PreTaxReturn', 0)):.4f}",
+                            'PreTaxReturn': f"{trade.get('PreTaxReturn', trade.get('PreTaxReturn', 0)):.2%}",
                             'HoldTime': trade.get('HoldTime', trade.get('hold_time', 0)),
                             'GainDollars': f"${trade.get('GainDollars', trade.get('gain_dollars', 0)):.2f}",
                             'SMA_A': trade.get('SMA_A', combo.get('sma_a', '')),
@@ -2774,7 +3361,7 @@ def view_batch_results():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', combo.get('sma_a', '')),
@@ -3067,7 +3654,7 @@ def view_batch_results():
                                     'SellDate': sell_date,
                                     'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                     'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                    'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                    'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                     'HoldTime': trade.get('HoldTime', 0),
                                     'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                     'SMA_A': trade.get('SMA_A', ''),
@@ -3164,7 +3751,7 @@ def view_batch_results():
                         'SellDate': sell_date,
                         'BuyPrice': f"{buy_price:.2f}" if isinstance(buy_price, (int, float)) else str(buy_price),
                         'SellPrice': f"{sell_price:.2f}" if isinstance(sell_price, (int, float)) else str(sell_price),
-                        'PreTaxReturn': f"{trade.get('PreTaxReturn', trade.get('PreTaxReturn', 0)):.4f}",
+                        'PreTaxReturn': f"{trade.get('PreTaxReturn', trade.get('PreTaxReturn', 0)):.2%}",
                         'HoldTime': trade.get('HoldTime', trade.get('hold_time', 0)),
                         'GainDollars': f"${trade.get('GainDollars', trade.get('gain_dollars', 0)):.2f}",
                         'SMA_A': trade.get('SMA_A', trade.get('sma_a', '')),
@@ -3251,7 +3838,7 @@ def view_batch_results():
                             'SellDate': sell_date,
                             'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                             'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                             'HoldTime': trade.get('HoldTime', 0),
                             'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                             'SMA_A': trade.get('SMA_A', ''),
@@ -3282,7 +3869,7 @@ def view_batch_results():
                             'SellDate': sell_date,
                             'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                             'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                             'HoldTime': trade.get('HoldTime', 0),
                             'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                             'SMA_A': trade.get('SMA_A', ''),
@@ -3471,6 +4058,64 @@ def open_scoring_config():
         "better_off_stability": ("Better Off Stability", "How much weight to give to consistent outperformance. Higher = prefer reliable edge."),
         "win_rate_stability": ("Win Rate Stability", "How much weight to give to consistent win rates. Higher = prefer stable performance.")
     }
+    
+    # Add Walk-Forward Combined Score Weighting section at the top (compact)
+    if not scoring_config.get("combined_score_weighting"):
+        scoring_config["combined_score_weighting"] = {"training_weight": 0.4, "walk_forward_weight": 0.6}
+    
+    combined_weighting = scoring_config.get("combined_score_weighting", {})
+    training_weight_default = combined_weighting.get("training_weight", 0.4)
+    wf_weight_default = combined_weighting.get("walk_forward_weight", 0.6)
+    
+    # Compact combined score weighting section at top
+    wf_compact_frame = ttk.LabelFrame(weights_frame, text="Walk-Forward Combined Score Weighting", padding="8")
+    wf_compact_frame.pack(fill="x", padx=10, pady=(0, 10))
+    
+    wf_compact_inner = ttk.Frame(wf_compact_frame)
+    wf_compact_inner.pack(fill="x", padx=5, pady=5)
+    
+    # Training weight (compact)
+    ttk.Label(wf_compact_inner, text="Training:", font=("Arial", 9)).grid(row=0, column=0, padx=5, sticky="w")
+    training_weight_var = tk.DoubleVar(value=training_weight_default)
+    training_weight_entry = ttk.Entry(wf_compact_inner, textvariable=training_weight_var, width=6)
+    training_weight_entry.grid(row=0, column=1, padx=5)
+    training_weight_percent = ttk.Label(wf_compact_inner, text=f"({training_weight_default*100:.0f}%)", 
+                                        font=("Arial", 8), foreground="gray")
+    training_weight_percent.grid(row=0, column=2, padx=2, sticky="w")
+    
+    # Walk-forward weight (compact)
+    ttk.Label(wf_compact_inner, text="Walk-Forward:", font=("Arial", 9)).grid(row=0, column=3, padx=(20, 5), sticky="w")
+    wf_weight_var = tk.DoubleVar(value=wf_weight_default)
+    wf_weight_entry = ttk.Entry(wf_compact_inner, textvariable=wf_weight_var, width=6)
+    wf_weight_entry.grid(row=0, column=4, padx=5)
+    wf_weight_percent = ttk.Label(wf_compact_inner, text=f"({wf_weight_default*100:.0f}%)", 
+                                  font=("Arial", 8), foreground="gray")
+    wf_weight_percent.grid(row=0, column=5, padx=2, sticky="w")
+    
+    # Combined weight sum display (compact)
+    combined_sum_label = ttk.Label(wf_compact_inner, text=f"Total: {training_weight_default + wf_weight_default:.2f} ({100*(training_weight_default + wf_weight_default):.0f}%)", 
+                                   font=("Arial", 9, "bold"))
+    combined_sum_label.grid(row=0, column=6, padx=(20, 5), sticky="w")
+    
+    def update_combined_percents():
+        try:
+            train_val = float(training_weight_var.get())
+            wf_val = float(wf_weight_var.get())
+            total = train_val + wf_val
+            training_weight_percent.config(text=f"({train_val*100:.0f}%)")
+            wf_weight_percent.config(text=f"({wf_val*100:.0f}%)")
+            color = "green" if abs(total - 1.0) < 0.01 else "orange" if abs(total - 1.0) < 0.1 else "red"
+            combined_sum_label.config(text=f"Total: {total:.2f} ({total*100:.0f}%)", foreground=color)
+        except:
+            pass
+    
+    training_weight_var.trace("w", lambda *args: update_combined_percents())
+    wf_weight_var.trace("w", lambda *args: update_combined_percents())
+    update_combined_percents()
+    
+    # Separator
+    separator_top = ttk.Separator(weights_frame, orient="horizontal")
+    separator_top.pack(fill="x", pady=(0, 10))
     
     # Populate weights tab
     header_frame = ttk.Frame(weights_frame)
@@ -3716,21 +4361,53 @@ def open_scoring_config():
             if new_thresholds["hold_time_min"] > new_thresholds["hold_time_max"]:
                 threshold_errors.append("Hold Time Min cannot be greater than Max")
         
-        if weight_errors or threshold_errors:
+        # Validate and update combined score weighting
+        combined_weighting_errors = []
+        try:
+            training_weight_val = float(training_weight_var.get())
+            wf_weight_val = float(wf_weight_var.get())
+            total = training_weight_val + wf_weight_val
+            
+            if abs(total - 1.0) > 0.01:
+                combined_weighting_errors.append(f"Combined score weights must sum to 1.0 (currently {total:.2f})")
+            elif training_weight_val < 0 or training_weight_val > 1:
+                combined_weighting_errors.append("Training weight must be between 0 and 1")
+            elif wf_weight_val < 0 or wf_weight_val > 1:
+                combined_weighting_errors.append("Walk-forward weight must be between 0 and 1")
+        except ValueError:
+            combined_weighting_errors.append("Combined score weights must be valid numbers")
+        
+        if weight_errors or threshold_errors or combined_weighting_errors:
             error_msg = "Please fix the following errors:\n\n"
             if weight_errors:
                 error_msg += "Weights:\n" + "\n".join(f"  • {e}" for e in weight_errors) + "\n\n"
             if threshold_errors:
                 error_msg += "Thresholds:\n" + "\n".join(f"  • {e}" for e in threshold_errors)
+            if combined_weighting_errors:
+                if weight_errors or threshold_errors:
+                    error_msg += "\n\n"
+                error_msg += "Combined Score Weighting:\n" + "\n".join(f"  • {e}" for e in combined_weighting_errors)
             messagebox.showerror("Validation Error", error_msg)
             return
         
+        # Save combined score weighting if valid
+        combined_weighting_to_save = {}
+        if not combined_weighting_errors:
+            combined_weighting_to_save = {
+                "training_weight": training_weight_val,
+                "walk_forward_weight": wf_weight_val
+            }
+        else:
+            # Keep existing if validation failed
+            combined_weighting_to_save = scoring_config.get("combined_score_weighting", {"training_weight": 0.4, "walk_forward_weight": 0.6})
+        
         scoring_config = {
             "weights": new_weights,
-            "thresholds": new_thresholds
+            "thresholds": new_thresholds,
+            "combined_score_weighting": combined_weighting_to_save
         }
         
-        messagebox.showinfo("Success", "Scoring configuration saved!\n\nChanges will apply to:\n• New backtests\n• Rescored cached backtests")
+        messagebox.showinfo("Success", "Scoring configuration saved!\n\nChanges will apply to:\n• New backtests\n• Rescored cached backtests\n• Combined score calculations")
         config_window.destroy()
     
     def reset_to_defaults():
@@ -3741,7 +4418,12 @@ def open_scoring_config():
             var.set(scoring_config["weights"][metric])
         for threshold, var in threshold_entries.items():
             var.set(scoring_config["thresholds"][threshold])
+        # Reset combined score weighting
+        if "combined_score_weighting" in scoring_config:
+            training_weight_var.set(scoring_config["combined_score_weighting"].get("training_weight", 0.4))
+            wf_weight_var.set(scoring_config["combined_score_weighting"].get("walk_forward_weight", 0.6))
         update_weight_sum()
+        update_combined_percents()
         messagebox.showinfo("Reset", "Reset to default values")
     
     def show_help():
@@ -3980,7 +4662,7 @@ def view_cached_backtests():
         xscrollcommand=tree_scroll_x_cache.set,
         columns=("Backtest_Score", "SMA_A", "SMA_B", "Taxed_Return", "Better_Off", "Win_Rate", "Trade_Count", 
                 "Winning_Trades", "Losing_Trades", "Max_Drawdown", "Avg_Hold_Time", "Avg_Trade_Return",
-                "Return_Std", "End_Liquidity", "Under1Y_PL", "Over1Y_PL", "Win_Pct_Last4"),
+                "Return_Std", "Win_Pct_Last4"),
         show="headings"
     )
     tree_scroll_y_cache.config(command=tree_cache.yview)
@@ -4000,9 +4682,6 @@ def view_cached_backtests():
     tree_cache.heading("Avg_Hold_Time", text="Avg Hold (days)")
     tree_cache.heading("Avg_Trade_Return", text="Avg Trade Return")
     tree_cache.heading("Return_Std", text="Return Std")
-    tree_cache.heading("End_Liquidity", text="End Liquidity")
-    tree_cache.heading("Under1Y_PL", text="Under 1Y P/L")
-    tree_cache.heading("Over1Y_PL", text="Over 1Y P/L")
     tree_cache.heading("Win_Pct_Last4", text="Win % Last 4")
     
     # Set column widths
@@ -4019,9 +4698,6 @@ def view_cached_backtests():
     tree_cache.column("Avg_Hold_Time", width=100, anchor="center")
     tree_cache.column("Avg_Trade_Return", width=120, anchor="center")
     tree_cache.column("Return_Std", width=90, anchor="center")
-    tree_cache.column("End_Liquidity", width=110, anchor="center")
-    tree_cache.column("Under1Y_PL", width=100, anchor="center")
-    tree_cache.column("Over1Y_PL", width=100, anchor="center")
     tree_cache.column("Win_Pct_Last4", width=100, anchor="center")
     
     tree_cache.pack(fill="both", expand=True)
@@ -4152,7 +4828,7 @@ def view_cached_backtests():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -4194,7 +4870,7 @@ def view_cached_backtests():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -4298,7 +4974,7 @@ def view_cached_backtests():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -4600,9 +5276,6 @@ def view_cached_backtests():
                     f"{combo.get('avg_hold_time', 0):.1f}",
                     f"{combo.get('avg_trade_return', 0):.4%}",
                     f"{combo.get('return_std', 0):.4f}",
-                    f"${combo.get('end_taxed_liquidity', 0):,.2f}",
-                    f"${combo.get('under1yearpl', 0):,.2f}",
-                    f"${combo.get('over1yearpl', 0):,.2f}",
                     win_pct_last4_str
                 )
                 
@@ -4953,15 +5626,79 @@ def create_ui():
     wf_inputs_frame = ttk.Frame(walk_forward_frame)
     wf_inputs_frame.pack(fill="x", pady=5)
     
+    # Validation function to ensure training + walk-forward = total timeframe
+    def validate_walk_forward_timeframe(*args):
+        if not enable_walk_forward_var.get():
+            return
+        try:
+            total_years = timeframe_years_var.get()
+            total_months = timeframe_months_var.get()
+            training_years = backtest_years_var.get()
+            training_months = backtest_months_var.get()
+            wf_years = walk_forward_years_var.get()
+            wf_months = walk_forward_months_var.get()
+            
+            total_total_months = total_years * 12 + total_months
+            training_total_months = training_years * 12 + training_months
+            wf_total_months = wf_years * 12 + wf_months
+            
+            # Calculate max allowed values
+            max_training_months = total_total_months - 1  # At least 1 month for walk-forward
+            max_wf_months = total_total_months - 1  # At least 1 month for training
+            
+            # Limit training period to not exceed total
+            if training_total_months > max_training_months:
+                # Cap at maximum
+                new_training_years = max_training_months // 12
+                new_training_months = max_training_months % 12
+                backtest_years_var.set(new_training_years)
+                backtest_months_var.set(new_training_months)
+                training_total_months = new_training_years * 12 + new_training_months
+            
+            # Auto-adjust walk-forward period to match total - training
+            remaining_months = total_total_months - training_total_months
+            if remaining_months <= 0:
+                # If training takes up all time, set walk-forward to minimum (1 month)
+                remaining_months = 1
+                # Reduce training to make room
+                new_training_total = total_total_months - 1
+                backtest_years_var.set(new_training_total // 12)
+                backtest_months_var.set(new_training_total % 12)
+                training_total_months = new_training_total
+            
+            new_wf_years = remaining_months // 12
+            new_wf_months = remaining_months % 12
+            
+            # Only update if different to avoid infinite loops
+            if wf_years != new_wf_years or wf_months != new_wf_months:
+                walk_forward_years_var.set(new_wf_years)
+                walk_forward_months_var.set(new_wf_months)
+            
+            # Update spinbox maximums dynamically to prevent invalid inputs
+            max_training_years = max_training_months // 12
+            backtest_years_spinbox.config(to=max(1, max_training_years))
+            # For months, if years is at max, limit months appropriately
+            if training_years >= max_training_years:
+                max_training_months_val = max_training_months % 12
+                backtest_months_spinbox.config(to=max(0, max_training_months_val))
+            else:
+                backtest_months_spinbox.config(to=11)
+        except:
+            pass  # Ignore errors during initialization
+    
     # Backtest Period (training period)
     backtest_period_frame = ttk.Frame(wf_inputs_frame)
     backtest_period_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
     ttk.Label(backtest_period_frame, text="Backtest Period:", width=18, anchor="w").pack(side="left", padx=2)
     backtest_years_var = tk.IntVar(value=4)
     backtest_months_var = tk.IntVar(value=0)
-    ttk.Spinbox(backtest_period_frame, from_=0, to=20, textvariable=backtest_years_var, width=5).pack(side="left", padx=2)
+    backtest_years_spinbox = ttk.Spinbox(backtest_period_frame, from_=0, to=20, textvariable=backtest_years_var, width=5)
+    backtest_years_spinbox.pack(side="left", padx=2)
+    backtest_years_var.trace_add("write", validate_walk_forward_timeframe)
     ttk.Label(backtest_period_frame, text="Y").pack(side="left", padx=1)
-    ttk.Spinbox(backtest_period_frame, from_=0, to=11, textvariable=backtest_months_var, width=5).pack(side="left", padx=2)
+    backtest_months_spinbox = ttk.Spinbox(backtest_period_frame, from_=0, to=11, textvariable=backtest_months_var, width=5)
+    backtest_months_spinbox.pack(side="left", padx=2)
+    backtest_months_var.trace_add("write", validate_walk_forward_timeframe)
     ttk.Label(backtest_period_frame, text="M").pack(side="left", padx=1)
     
     # Walk-Forward Period (testing period)
@@ -4970,10 +5707,21 @@ def create_ui():
     ttk.Label(walk_forward_period_frame, text="Walk-Forward Period:", width=18, anchor="w").pack(side="left", padx=2)
     walk_forward_years_var = tk.IntVar(value=1)
     walk_forward_months_var = tk.IntVar(value=0)
-    ttk.Spinbox(walk_forward_period_frame, from_=0, to=10, textvariable=walk_forward_years_var, width=5).pack(side="left", padx=2)
+    walk_forward_years_spinbox = ttk.Spinbox(walk_forward_period_frame, from_=0, to=10, textvariable=walk_forward_years_var, width=5, state="readonly")
+    walk_forward_years_spinbox.pack(side="left", padx=2)
     ttk.Label(walk_forward_period_frame, text="Y").pack(side="left", padx=1)
-    ttk.Spinbox(walk_forward_period_frame, from_=0, to=11, textvariable=walk_forward_months_var, width=5).pack(side="left", padx=2)
+    walk_forward_months_spinbox = ttk.Spinbox(walk_forward_period_frame, from_=0, to=11, textvariable=walk_forward_months_var, width=5, state="readonly")
+    walk_forward_months_spinbox.pack(side="left", padx=2)
     ttk.Label(walk_forward_period_frame, text="M").pack(side="left", padx=1)
+    ttk.Label(walk_forward_period_frame, text="(auto)", font=("Arial", 8), foreground="gray").pack(side="left", padx=5)
+    
+    # Also validate when total timeframe changes
+    timeframe_years_var.trace_add("write", validate_walk_forward_timeframe)
+    timeframe_months_var.trace_add("write", validate_walk_forward_timeframe)
+    enable_walk_forward_var.trace_add("write", validate_walk_forward_timeframe)
+    
+    # Initial validation to set correct values
+    validate_walk_forward_timeframe()
     
     wf_inputs_frame.columnconfigure(0, weight=1)
 

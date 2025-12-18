@@ -52,26 +52,42 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     if len(data) == 0:
         raise ValueError("No data available for walk-forward analysis")
     
-    # Simple walk-forward: Train on first X years, test on remaining years
-    # Calculate training period
-    train_start = data['Date'].min()
+    # Walk-forward: Calculate periods backward from end_date
+    # Test period is the walk-forward period ending at end_date
+    test_end = end_date_dt
+    test_period = relativedelta(years=walk_forward_period_years, months=walk_forward_period_months)
+    test_start = test_end - test_period + timedelta(days=1)  # Start test period (walk_forward_period before end_date)
+    
+    # Training period is the backtest_period ending just before test period
+    train_end = test_start - timedelta(days=1)  # Training ends the day before test starts
     train_period = relativedelta(years=backtest_period_years, months=backtest_period_months)
-    train_end = train_start + train_period
+    train_start = train_end - train_period + timedelta(days=1)  # Training starts (backtest_period before train_end)
     
-    # Test period is everything after training period
-    test_start = train_end + timedelta(days=1)  # Start test day after training ends
-    test_end = data['Date'].max()
+    # Ensure we have enough data
+    data_min = data['Date'].min()
+    data_max = data['Date'].max()
     
-    # Check if we have enough data
-    if train_end >= test_end:
-        raise ValueError(f"Not enough data for walk-forward. Training period ({backtest_period_years} years, {backtest_period_months} months) exceeds available data.")
+    if train_start < data_min:
+        raise ValueError(f"Not enough data for walk-forward. Training period requires data from {train_start.date()}, but earliest data is {data_min.date()}.")
+    
+    if test_end > data_max:
+        raise ValueError(f"Not enough data for walk-forward. Test period requires data until {test_end.date()}, but latest data is {data_max.date()}.")
     
     if progress_callback:
         progress_callback(10)
     
-    print(f"Walk-forward analysis:")
-    print(f"  Training Period: {train_start.date()} to {train_end.date()}")
-    print(f"  Test Period: {test_start.date()} to {test_end.date()}")
+    # Debug logging for time periods
+    print(f"\n[WALK-FORWARD TIME DEBUG]")
+    print(f"  Input end_date: {end_date_dt.date()}")
+    print(f"  Data date range: {data['Date'].min().date()} to {data['Date'].max().date()}")
+    print(f"  Training period input: {backtest_period_years} years, {backtest_period_months} months")
+    print(f"  Walk-forward period input: {walk_forward_period_years} years, {walk_forward_period_months} months")
+    print(f"  Calculated Training Period: {train_start.date()} to {train_end.date()}")
+    print(f"  Calculated Test Period: {test_start.date()} to {test_end.date()}")
+    print(f"  Training data rows: {len(data[(data['Date'] >= train_start) & (data['Date'] <= train_end)])}")
+    print(f"  Test data rows: {len(data[(data['Date'] >= test_start) & (data['Date'] <= test_end)])}")
+    print(f"  Overlap check: train_end ({train_end.date()}) < test_start ({test_start.date()}): {train_end < test_start}")
+    print(f"  Total period: {(test_end - train_start).days / 365.25:.2f} years")
     
     # Get training data
     train_data = data[(data['Date'] >= train_start) & (data['Date'] <= train_end)].copy()
@@ -291,7 +307,8 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
         "segments": 1,  # Simple mode has 1 segment
         "training_score": training_score,
         "walk_forward_score": walk_forward_score,
-        "combined_score": (training_score * 0.4 + walk_forward_score * 0.6),
+        "combined_score": (training_score * scoring_config.get("combined_score_weighting", {}).get("training_weight", 0.4) + 
+                          walk_forward_score * scoring_config.get("combined_score_weighting", {}).get("walk_forward_weight", 0.6)),
         "training_trades": training_trades,  # Store training trades separately
         "walk_forward_trades": walk_forward_trades,  # Store walk-forward trades separately
         "training_period": {"start": train_start, "end": train_end},
@@ -492,43 +509,78 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     if len(data) == 0:
         return {"Error": "No data available for walk-forward analysis"}
     
-    # Calculate training period
-    train_start = data['Date'].min()
+    # Walk-forward: Calculate periods backward from end_date
+    # Test period is the walk-forward period ending at end_date
+    test_end = end_date_dt
+    test_period = relativedelta(years=walk_forward_period_years, months=walk_forward_period_months)
+    test_start = test_end - test_period + timedelta(days=1)  # Start test period (walk_forward_period before end_date)
+    
+    # Training period is the backtest_period ending just before test period
+    train_end = test_start - timedelta(days=1)  # Training ends the day before test starts
     train_period = relativedelta(years=backtest_period_years, months=backtest_period_months)
-    train_end = train_start + train_period
+    train_start = train_end - train_period + timedelta(days=1)  # Training starts (backtest_period before train_end)
     
-    # Test period is everything after training period
-    test_start = train_end + timedelta(days=1)  # Start test day after training ends
-    test_end = data['Date'].max()
+    # Ensure we have enough data
+    data_min = data['Date'].min()
+    data_max = data['Date'].max()
     
-    # Check if we have enough data
-    if train_end >= test_end:
-        return {"Error": f"Not enough data for walk-forward. Training period ({backtest_period_years} years, {backtest_period_months} months) exceeds available data."}
+    if train_start < data_min:
+        return {"Error": f"Not enough data for walk-forward. Training period requires data from {train_start.date()}, but earliest data is {data_min.date()}."}
+    
+    if test_end > data_max:
+        return {"Error": f"Not enough data for walk-forward. Test period requires data until {test_end.date()}, but latest data is {data_max.date()}."}
     
     if progress_callback:
         progress_callback(10)
     
-    # If training_result provided, use it; otherwise run training
-    if training_result is None or "Error" in training_result:
-        # Get training data
-        train_data = data[(data['Date'] >= train_start) & (data['Date'] <= train_end)].copy()
-        
-        if len(train_data) == 0:
-            return {"Error": "No training data available"}
-        
-        if progress_callback:
-            progress_callback(20)
-        
-        training_result = algorithm.run_algorithm(
-            train_data,
-            start_amount=start_amount,
-            progress_callback=lambda p: progress_callback(20 + p * 0.4) if progress_callback else None,
-            compounding=compounding,
-            optimization_objective=optimization_objective,
-            start_date=train_start.strftime("%Y-%m-%d"),
-            end_date=train_end.strftime("%Y-%m-%d"),
-            use_cache=True
-        )
+    # Debug logging for time periods
+    print(f"\n[BATCH WALK-FORWARD TIME DEBUG]")
+    print(f"  Input end_date: {end_date_dt.date()}")
+    print(f"  Data date range: {data['Date'].min().date()} to {data['Date'].max().date()}")
+    print(f"  Training period input: {backtest_period_years} years, {backtest_period_months} months")
+    print(f"  Walk-forward period input: {walk_forward_period_years} years, {walk_forward_period_months} months")
+    print(f"  Calculated Training Period: {train_start.date()} to {train_end.date()}")
+    print(f"  Calculated Test Period: {test_start.date()} to {test_end.date()}")
+    print(f"  Training data rows: {len(data[(data['Date'] >= train_start) & (data['Date'] <= train_end)])}")
+    print(f"  Test data rows: {len(data[(data['Date'] >= test_start) & (data['Date'] <= test_end)])}")
+    print(f"  Overlap check: train_end ({train_end.date()}) < test_start ({test_start.date()}): {train_end < test_start}")
+    print(f"  Total period: {(test_end - train_start).days / 365.25:.2f} years")
+    print(f"  Training result provided: {training_result is not None}")
+    print(f"  ALWAYS recalculating training on training period only (ignoring provided training_result)")
+    
+    # Always recalculate training on training period only (ignore provided training_result from full timeframe)
+    # Get training data
+    train_data = data[(data['Date'] >= train_start) & (data['Date'] <= train_end)].copy()
+    
+    if len(train_data) == 0:
+        return {"Error": "No training data available"}
+    
+    print(f"  Running algorithm on training period only: {train_start.date()} to {train_end.date()}")
+    
+    if progress_callback:
+        progress_callback(20)
+    
+    # Always run training on training period only
+    training_result = algorithm.run_algorithm(
+        train_data,
+        start_amount=start_amount,
+        progress_callback=lambda p: progress_callback(20 + p * 0.4) if progress_callback else None,
+        compounding=compounding,
+        optimization_objective=optimization_objective,
+        start_date=train_start.strftime("%Y-%m-%d"),
+        end_date=train_end.strftime("%Y-%m-%d"),
+        use_cache=True
+    )
+    
+    print(f"  Training algorithm completed. Training result date range check:")
+    if "Error" not in training_result:
+        training_trades = training_result.get('besttrades', [])
+        if training_trades:
+            training_trade_dates = [pd.to_datetime(t.get('Date', train_start)) for t in training_trades if 'Date' in t]
+            if training_trade_dates:
+                print(f"    Training trades date range: {min(training_trade_dates).date()} to {max(training_trade_dates).date()}")
+                print(f"    Expected training range: {train_start.date()} to {train_end.date()}")
+                print(f"    Training trades within bounds: {min(training_trade_dates) >= train_start and max(training_trade_dates) <= train_end}")
     
     if "Error" in training_result:
         return training_result
@@ -699,7 +751,8 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
         "segments": 1,  # Simple mode has 1 segment
         "training_score": training_score,
         "walk_forward_score": walk_forward_score,
-        "combined_score": (training_score * 0.4 + walk_forward_score * 0.6),
+        "combined_score": (training_score * scoring_config.get("combined_score_weighting", {}).get("training_weight", 0.4) + 
+                          walk_forward_score * scoring_config.get("combined_score_weighting", {}).get("walk_forward_weight", 0.6)),
         "training_trades": training_trades,  # Store training trades separately
         "walk_forward_trades": walk_forward_trades,  # Store walk-forward trades separately
         "training_period": {"start": train_start, "end": train_end},
