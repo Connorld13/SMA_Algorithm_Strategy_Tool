@@ -744,47 +744,44 @@ def on_run_now():
     thread.start()
 
 def display_results():
-    """Display results in the log text area."""
-    global data, scoring_config  # Add global declaration
+    """Display brief status in the log text area. Full results are available in the Results Analysis view."""
+    global data, scoring_config
     if cancel_requested:
         return
         
     log_text.delete(1.0, tk.END)
-    for ticker, result in algorithm_results.items():
-        log_text.insert(tk.END, f"Results for {ticker}:\n")
-        if "Error" in result:
-            log_text.insert(tk.END, f"  {result['Error']}\n\n")
-            continue
-        
-        # Calculate and display score
+    
+    valid_results = {k: v for k, v in algorithm_results.items() if "Error" not in v}
+    error_count = len(algorithm_results) - len(valid_results)
+    
+    if not valid_results:
+        log_text.insert(tk.END, "⚠️ No valid results to display. Check for errors above.\n")
+        return
+    
+    # Show brief summary
+    log_text.insert(tk.END, f"✓ Algorithm completed successfully!\n\n")
+    log_text.insert(tk.END, f"Results Summary:\n")
+    log_text.insert(tk.END, f"  • Stocks analyzed: {len(valid_results)}\n")
+    if error_count > 0:
+        log_text.insert(tk.END, f"  • Errors: {error_count}\n")
+    
+    # Show quick score summary
+    log_text.insert(tk.END, f"\nQuick Scores:\n")
+    for ticker, result in list(valid_results.items())[:5]:  # Show first 5
         try:
             if result.get("walk_forward_mode", False):
-                # Walk-forward mode: show all three scores
-                training_score = result.get("training_score", 0.0)
-                walk_forward_score = result.get("walk_forward_score", 0.0)
-                combined_score = result.get("combined_score", 0.0)
-                segments = result.get("segments", 0)
-                log_text.insert(tk.END, f"  ⭐ Walk-Forward Analysis ({segments} segments):\n")
-                log_text.insert(tk.END, f"    Training Score: {training_score:.2f}/10.0\n")
-                log_text.insert(tk.END, f"    Walk-Forward Score: {walk_forward_score:.2f}/10.0\n")
-                log_text.insert(tk.END, f"    Combined Score: {combined_score:.2f}/10.0 (40% training + 60% walk-forward)\n\n")
+                score = result.get("walk_forward_score", 0.0)
+                log_text.insert(tk.END, f"  • {ticker}: {score:.2f}/10.0 (Walk-Forward)\n")
             else:
-                # Standard mode: show single score
                 score = scoring.calculate_backtest_score(result, scoring_config)
-                log_text.insert(tk.END, f"  ⭐ Backtest Score: {score:.2f}/10.0\n\n")
-        except Exception as e:
-            print(f"Error calculating score: {e}")
-        
-        log_text.insert(tk.END, "  Output Results 1:\n")
-        for key, value in result['outputresults1'].items():
-            log_text.insert(tk.END, f"    {key}: {value}\n")
-        log_text.insert(tk.END, "  Output Results 2:\n")
-        for key, value in result['outputresults2'].items():
-            log_text.insert(tk.END, f"    {key}: {value}\n")
-        log_text.insert(tk.END, "  Parameter Stability Metrics:\n")
-        for key, value in result['param_stability'].items():
-            log_text.insert(tk.END, f"    {key}: {value}\n")
-        log_text.insert(tk.END, "\n")
+                log_text.insert(tk.END, f"  • {ticker}: {score:.2f}/10.0\n")
+        except:
+            log_text.insert(tk.END, f"  • {ticker}: Score calculation error\n")
+    
+    if len(valid_results) > 5:
+        log_text.insert(tk.END, f"  ... and {len(valid_results) - 5} more\n")
+    
+    log_text.insert(tk.END, f"\n💡 Click 'View Results' to see comprehensive analysis with drill-down capabilities.\n")
 
     # Show interactive chart if enabled and in single stock mode
     mode = mode_var.get()
@@ -1620,25 +1617,29 @@ def load_batch_from_folder():
     listbox.bind("<Double-1>", on_double_click)
 
 def view_batch_results():
-    """Enhanced batch results view with comprehensive metrics and drill-down capability."""
+    """Comprehensive results view - handles both single stock and batch results with full drill-down capability."""
     global algorithm_results, scoring_config
     
     if not algorithm_results:
-        messagebox.showwarning("No Data", "Please run the algorithm first before viewing batch results.")
+        messagebox.showwarning("No Data", "Please run the algorithm first before viewing results.")
         return
     
-    # Filter out errors and check if we have multiple stocks
+    # Filter out errors
     valid_results = {k: v for k, v in algorithm_results.items() if "Error" not in v}
-    if len(valid_results) < 2:
-        messagebox.showinfo("Not a Batch Run", "Batch view is only available when multiple stocks are run. Current results show only one stock.")
+    if len(valid_results) == 0:
+        messagebox.showwarning("No Valid Results", "No valid results found. Please run the algorithm first.")
         return
+    
+    # Allow single stock or batch - both use the same comprehensive view
+    is_batch = len(valid_results) >= 2
     
     # Check if any have walk forward mode
     has_walk_forward = any(r.get("walk_forward_mode", False) for r in valid_results.values())
     
-    # Create enhanced batch view window
+    # Create comprehensive results view window
     batch_window = tk.Toplevel(root)
-    batch_window.title("Enhanced Batch Results Analysis")
+    window_title = "Results Analysis" if is_batch else f"Results Analysis: {list(valid_results.keys())[0]}"
+    batch_window.title(window_title)
     batch_window.geometry("1800x1000")
     
     # Create notebook for tabs
@@ -1702,12 +1703,27 @@ def view_batch_results():
         avg_return = np.mean(all_returns) if all_returns else 0
         max_return = np.max(all_returns) if all_returns else 0
     
-    ttk.Label(stats_grid, text=f"Total Stocks: {len(valid_results)}", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=20, pady=5, sticky="w")
-    ttk.Label(stats_grid, text=f"Average Score: {avg_score:.2f}", font=("Arial", 10)).grid(row=0, column=1, padx=20, pady=5, sticky="w")
-    ttk.Label(stats_grid, text=f"Best Score: {max_score:.2f}", font=("Arial", 10)).grid(row=0, column=2, padx=20, pady=5, sticky="w")
-    ttk.Label(stats_grid, text=f"Worst Score: {min_score:.2f}", font=("Arial", 10)).grid(row=0, column=3, padx=20, pady=5, sticky="w")
-    ttk.Label(stats_grid, text=f"Average Return: {avg_return:.2%}", font=("Arial", 10)).grid(row=1, column=0, padx=20, pady=5, sticky="w")
-    ttk.Label(stats_grid, text=f"Best Return: {max_return:.2%}", font=("Arial", 10)).grid(row=1, column=1, padx=20, pady=5, sticky="w")
+    # Display stats - adapt for single stock vs batch
+    if is_batch:
+        ttk.Label(stats_grid, text=f"Total Stocks: {len(valid_results)}", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=20, pady=5, sticky="w")
+        ttk.Label(stats_grid, text=f"Average Score: {avg_score:.2f}", font=("Arial", 10)).grid(row=0, column=1, padx=20, pady=5, sticky="w")
+        ttk.Label(stats_grid, text=f"Best Score: {max_score:.2f}", font=("Arial", 10)).grid(row=0, column=2, padx=20, pady=5, sticky="w")
+        ttk.Label(stats_grid, text=f"Worst Score: {min_score:.2f}", font=("Arial", 10)).grid(row=0, column=3, padx=20, pady=5, sticky="w")
+        ttk.Label(stats_grid, text=f"Average Return: {avg_return:.2%}", font=("Arial", 10)).grid(row=1, column=0, padx=20, pady=5, sticky="w")
+        ttk.Label(stats_grid, text=f"Best Return: {max_return:.2%}", font=("Arial", 10)).grid(row=1, column=1, padx=20, pady=5, sticky="w")
+    else:
+        # Single stock - show key metrics
+        single_symbol = list(valid_results.keys())[0]
+        single_result = valid_results[single_symbol]
+        if has_walk_forward and single_result.get("walk_forward_mode", False):
+            single_score = single_result.get("walk_forward_score", 0.0)
+            single_return = single_result.get("walk_forward_metrics", {}).get("taxed_return", 0)
+        else:
+            single_score = scoring.calculate_backtest_score(single_result, scoring_config)
+            single_return = single_result.get("outputresults1", {}).get("besttaxedreturn", 0)
+        ttk.Label(stats_grid, text=f"Stock: {single_symbol}", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=20, pady=5, sticky="w")
+        ttk.Label(stats_grid, text=f"Score: {single_score:.2f}/10.0", font=("Arial", 10)).grid(row=0, column=1, padx=20, pady=5, sticky="w")
+        ttk.Label(stats_grid, text=f"Return: {single_return:.2%}", font=("Arial", 10)).grid(row=0, column=2, padx=20, pady=5, sticky="w")
     
     # Action buttons frame
     export_frame = ttk.Frame(summary_frame)
@@ -1991,7 +2007,173 @@ def view_batch_results():
         
         listbox.bind("<Double-1>", on_double_click)
     
-    ttk.Button(export_frame, text="📁 Load Previous Batch", command=load_previous_batch_from_view).pack(side="right", padx=5)
+    # Add cached backtest loading button (replaces separate view_cached_backtests)
+    def load_cached_backtests():
+        """Load cached backtests into the results view."""
+        from pathlib import Path
+        import pickle
+        import cache_manager
+        
+        cache_dir = cache_manager.CACHE_DIR
+        
+        # Find all batch folders and root cache files
+        batch_folders = [d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith('.')] if cache_dir.exists() else []
+        root_cache_files = list(cache_dir.glob("*.pkl")) if cache_dir.exists() else []
+        
+        if not batch_folders and not root_cache_files:
+            messagebox.showinfo("No Cache", "No cached backtest results found.")
+            return
+        
+        # Create selection window
+        select_window = tk.Toplevel(batch_window)
+        select_window.title("Load Cached Backtests")
+        select_window.geometry("700x500")
+        
+        ttk.Label(select_window, text="Select source:", font=("Arial", 12, "bold")).pack(pady=10)
+        
+        # Radio buttons for source type
+        source_var = tk.StringVar(value="Batch Folder" if batch_folders else "Root Cache Files")
+        ttk.Radiobutton(select_window, text="Batch Folder", variable=source_var, value="Batch Folder").pack(pady=5)
+        ttk.Radiobutton(select_window, text="Root Cache Files", variable=source_var, value="Root Cache Files").pack(pady=5)
+        
+        # Listbox for selection
+        list_frame = ttk.Frame(select_window)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=("Arial", 10))
+        scrollbar.config(command=listbox.yview)
+        listbox.pack(fill="both", expand=True)
+        
+        def update_list():
+            """Update listbox based on selected source."""
+            listbox.delete(0, tk.END)
+            if source_var.get() == "Batch Folder":
+                batch_folders = [d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith('.')] if cache_dir.exists() else []
+                batch_folders_sorted = sorted(batch_folders, key=lambda x: x.name, reverse=True)
+                for folder in batch_folders_sorted:
+                    cache_files = list(folder.glob("*.pkl"))
+                    listbox.insert(tk.END, f"{folder.name} ({len(cache_files)} files)")
+            else:
+                root_cache_files = list(cache_dir.glob("*.pkl")) if cache_dir.exists() else []
+                for f in sorted(root_cache_files, key=lambda x: x.name, reverse=True):
+                    listbox.insert(tk.END, f"{f.name} ({f.stat().st_size / 1024:.1f} KB)")
+        
+        source_var.trace("w", lambda *args: update_list())
+        update_list()
+        
+        def load_selected():
+            """Load selected cached backtests."""
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection", "Please select an item to load.")
+                return
+            
+            selected_text = listbox.get(selection[0])
+            select_window.destroy()
+            
+            # Load based on source type
+            loaded_results = {}
+            errors = []
+            
+            if source_var.get() == "Batch Folder":
+                # Extract folder name
+                folder_name = selected_text.split(" (")[0]
+                selected_folder = cache_dir / folder_name
+                cache_files = list(selected_folder.glob("*.pkl"))
+            else:
+                # Root cache file
+                file_name = selected_text.split(" (")[0]
+                cache_files = [cache_dir / file_name]
+            
+            # Load all cache files (same logic as load_previous_batch_from_view)
+            for cache_file in cache_files:
+                try:
+                    with open(cache_file, 'rb') as f:
+                        cache_data = pickle.load(f)
+                    
+                    ticker = cache_data.get('ticker')
+                    if not ticker:
+                        continue
+                    
+                    all_combinations = cache_data.get('all_combinations', [])
+                    best_idx = cache_data.get('best_combination_idx', 0)
+                    noalgoreturn = cache_data.get('noalgoreturn', 0)
+                    
+                    if all_combinations and best_idx < len(all_combinations):
+                        best_combo = all_combinations[best_idx]
+                    else:
+                        best_combo = all_combinations[0] if all_combinations else {}
+                    
+                    outputresults1 = {
+                        "besta": best_combo.get('sma_a', ''),
+                        "bestb": best_combo.get('sma_b', ''),
+                        "besttaxedreturn": best_combo.get('taxed_return', 0),
+                        "betteroff": best_combo.get('better_off', 0),
+                        "besttradecount": best_combo.get('trade_count', 0),
+                        "noalgoreturn": noalgoreturn,
+                        "optimization_objective": cache_data.get('optimization_objective', 'taxed_return')
+                    }
+                    
+                    outputresults2 = {
+                        "winningtradepct": best_combo.get('win_rate', 0),
+                        "maxdrawdown(worst trade return pct)": best_combo.get('max_drawdown', 0),
+                        "average_hold_time": best_combo.get('avg_hold_time', 0),
+                        "bestendtaxed_liquidity": best_combo.get('end_taxed_liquidity', 0),
+                        "win_percentage_last_4_trades": best_combo.get('win_pct_last_4', None),
+                        "losingtrades": best_combo.get('losing_trades', 0),
+                        "losingtradepct": 1 - best_combo.get('win_rate', 0) if best_combo.get('win_rate', 0) else 0
+                    }
+                    
+                    param_stability = cache_data.get('param_stability', {})
+                    
+                    result = {
+                        "outputresults1": outputresults1,
+                        "outputresults2": outputresults2,
+                        "param_stability": param_stability,
+                        "all_combinations": all_combinations,
+                        "best_combination_idx": best_idx,
+                        "noalgoreturn": noalgoreturn,
+                        "besttrades": cache_data.get('besttrades', []),
+                        "walk_forward_mode": cache_data.get('walk_forward_mode', False),
+                        "segments": cache_data.get('segments', 0),
+                        "training_score": cache_data.get('training_score', 0.0),
+                        "walk_forward_score": cache_data.get('walk_forward_score', 0.0),
+                        "combined_score": cache_data.get('combined_score', 0.0),
+                        "training_metrics": cache_data.get('training_metrics', {}),
+                        "walk_forward_metrics": cache_data.get('walk_forward_metrics', {}),
+                        "training_trades": cache_data.get('training_trades', []),
+                        "walk_forward_trades": cache_data.get('walk_forward_trades', []),
+                        "walk_forward_segment_trades": cache_data.get('walk_forward_segment_trades', [])
+                    }
+                    
+                    loaded_results[ticker] = result
+                except Exception as e:
+                    errors.append(f"{cache_file.name}: {str(e)}")
+            
+            if errors:
+                messagebox.showwarning("Load Warnings", f"Some files had errors:\n\n" + "\n".join(errors[:10]))
+            
+            if not loaded_results:
+                messagebox.showerror("Load Error", "No valid results could be loaded.")
+                return
+            
+            # Update algorithm_results and refresh view
+            global algorithm_results
+            algorithm_results = loaded_results
+            batch_window.destroy()
+            view_batch_results()
+        
+        button_frame = ttk.Frame(select_window)
+        button_frame.pack(fill="x", padx=10, pady=10)
+        ttk.Button(button_frame, text="Load", command=load_selected).pack(side="right", padx=5)
+        ttk.Button(button_frame, text="Cancel", command=select_window.destroy).pack(side="right", padx=5)
+        
+        listbox.bind("<Double-1>", lambda e: load_selected())
+    
+    ttk.Button(export_frame, text="📁 Load Cached Results", command=load_cached_backtests).pack(side="right", padx=5)
     ttk.Button(export_frame, text="📊 Export to CSV", command=lambda: export_batch_to_csv(valid_results)).pack(side="right", padx=5)
     
     # ========== MAIN RESULTS TAB ==========
@@ -2209,7 +2391,8 @@ def view_batch_results():
     tree_batch.bind("<Double-1>", on_double_click)
     
     # Status label
-    status_label = ttk.Label(results_tab, text=f"Double-click a row to view detailed analysis | Showing {len(batch_data)} stocks")
+    status_text = f"Double-click a row to view detailed analysis | Showing {len(batch_data)} stock{'s' if len(batch_data) > 1 else ''}"
+    status_label = ttk.Label(results_tab, text=status_text)
     status_label.pack(pady=5)
     
     # ========== DETAIL VIEW FUNCTION ==========
@@ -2387,8 +2570,235 @@ def view_batch_results():
             # Configure tags
             combos_tree.tag_configure("best", background="#fff9c4")
             combos_tree.tag_configure("top_score", background="#c8e6c9")
+            
+            # Store combo_scores for drill-down
+            combo_scores_store = combo_scores.copy()
+            
+            # Double-click to drill down
+            def on_combo_double_click(event):
+                selection = combos_tree.selection()
+                if not selection:
+                    return
+                item = selection[0]
+                values = combos_tree.item(item, "values")
+                if values:
+                    # Find the combo by SMA_A and SMA_B (columns 1 and 2)
+                    sma_a = values[1]
+                    sma_b = values[2]
+                    # Find matching combo in stored scores
+                    selected_combo = None
+                    for combo, score in combo_scores_store:
+                        if str(combo.get('sma_a', '')) == sma_a and str(combo.get('sma_b', '')) == sma_b:
+                            selected_combo = combo
+                            break
+                    if selected_combo:
+                        show_combo_detail(detail_window, selected_combo, scoring_config, noalgoreturn, param_stability)
+            
+            combos_tree.bind("<Double-1>", on_combo_double_click)
+            
+            # Status label
+            status_text = f"Double-click a row to view detailed analysis | Showing {len(combo_scores)} combinations"
+            combo_status_label = ttk.Label(combos_tab, text=status_text)
+            combo_status_label.pack(pady=5)
         else:
             ttk.Label(combos_tab, text="No combinations data available", font=("Arial", 12)).pack(pady=20)
+        
+        # ========== COMBO DETAIL FUNCTION ==========
+        def show_combo_detail(parent_window, combo, scoring_config, noalgoreturn, param_stability):
+            """Show detailed view for a single combination."""
+            combo_window = tk.Toplevel(parent_window)
+            combo_window.title(f"Combination Detail: SMA {combo.get('sma_a', '')}/{combo.get('sma_b', '')}")
+            combo_window.geometry("1600x900")
+            
+            # Create notebook for detail tabs
+            combo_notebook = ttk.Notebook(combo_window)
+            combo_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+            
+            # Overview tab
+            overview_tab = ttk.Frame(combo_notebook)
+            combo_notebook.add(overview_tab, text="Overview")
+            
+            # Key metrics frame
+            metrics_frame = ttk.LabelFrame(overview_tab, text="Combination Performance Metrics", padding="15")
+            metrics_frame.pack(fill="x", padx=10, pady=10)
+            
+            metrics_grid = ttk.Frame(metrics_frame)
+            metrics_grid.pack(fill="both", expand=True)
+            
+            # Calculate score
+            combo_result = {
+                "outputresults1": {
+                    "besttaxedreturn": combo.get("taxed_return", 0),
+                    "betteroff": combo.get("better_off", 0),
+                    "besttradecount": combo.get("trade_count", 0),
+                    "noalgoreturn": noalgoreturn
+                },
+                "outputresults2": {
+                    "winningtradepct": combo.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
+                    "average_hold_time": combo.get("avg_hold_time", 0)
+                },
+                "param_stability": param_stability
+            }
+            combo_score = scoring.calculate_backtest_score(combo_result, scoring_config)
+            
+            # Display metrics in a grid
+            row = 0
+            ttk.Label(metrics_grid, text=f"Parameters: SMA {combo.get('sma_a', '')}/{combo.get('sma_b', '')}", 
+                     font=("Arial", 12, "bold")).grid(row=row, column=0, columnspan=3, pady=10, sticky="w")
+            row += 1
+            
+            ttk.Label(metrics_grid, text=f"Backtest Score: {combo_score:.2f}/10.0", 
+                     font=("Arial", 11, "bold")).grid(row=row, column=0, columnspan=3, pady=5, sticky="w")
+            row += 1
+            
+            ttk.Label(metrics_grid, text=f"Taxed Return: {combo.get('taxed_return', 0):.2%}").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"Better Off: {combo.get('better_off', 0):.2%}").grid(row=row, column=1, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"Win Rate: {combo.get('win_rate', 0):.2%}").grid(row=row, column=2, padx=10, pady=5, sticky="w")
+            row += 1
+            
+            ttk.Label(metrics_grid, text=f"Total Trades: {combo.get('trade_count', 0)}").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"Winning Trades: {combo.get('winning_trades', 0)}").grid(row=row, column=1, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"Losing Trades: {combo.get('losing_trades', 0)}").grid(row=row, column=2, padx=10, pady=5, sticky="w")
+            row += 1
+            
+            ttk.Label(metrics_grid, text=f"Max Drawdown: {combo.get('max_drawdown', 0):.2%}").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"Avg Hold Time: {combo.get('avg_hold_time', 0):.1f} days").grid(row=row, column=1, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"Avg Trade Return: {combo.get('avg_trade_return', 0):.2%}").grid(row=row, column=2, padx=10, pady=5, sticky="w")
+            row += 1
+            
+            ttk.Label(metrics_grid, text=f"Return Std Dev: {combo.get('return_std', 0):.4f}").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            ttk.Label(metrics_grid, text=f"End Liquidity: ${combo.get('end_taxed_liquidity', 0):,.2f}").grid(row=row, column=1, padx=10, pady=5, sticky="w")
+            win_pct_last4 = combo.get('win_pct_last_4', None)
+            win_pct_str = f"{win_pct_last4:.2%}" if win_pct_last4 is not None else "N/A"
+            ttk.Label(metrics_grid, text=f"Win % Last 4: {win_pct_str}").grid(row=row, column=2, padx=10, pady=5, sticky="w")
+            row += 1
+            
+            if combo.get('under1yearpl') is not None or combo.get('over1yearpl') is not None:
+                ttk.Label(metrics_grid, text=f"Under 1Y P/L: ${combo.get('under1yearpl', 0):,.2f}").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+                ttk.Label(metrics_grid, text=f"Over 1Y P/L: ${combo.get('over1yearpl', 0):,.2f}").grid(row=row, column=1, padx=10, pady=5, sticky="w")
+            
+            # Trades tab
+            trades_tab = ttk.Frame(combo_notebook)
+            combo_notebook.add(trades_tab, text="Trades")
+            
+            # Get trades for this combination
+            combo_trades = combo.get('trades', [])
+            
+            if combo_trades:
+                # Tree frame with scrollbars
+                trades_tree_frame = ttk.Frame(trades_tab)
+                trades_tree_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                
+                trades_scroll_y = ttk.Scrollbar(trades_tree_frame, orient="vertical")
+                trades_scroll_y.pack(side="right", fill="y")
+                trades_scroll_x = ttk.Scrollbar(trades_tree_frame, orient="horizontal")
+                trades_scroll_x.pack(side="bottom", fill="x")
+                
+                trades_tree = ttk.Treeview(trades_tree_frame, 
+                                          yscrollcommand=trades_scroll_y.set,
+                                          xscrollcommand=trades_scroll_x.set)
+                trades_scroll_y.config(command=trades_tree.yview)
+                trades_scroll_x.config(command=trades_tree.xview)
+                trades_tree.pack(fill="both", expand=True)
+                
+                # Convert trades if needed (handle both formats)
+                formatted_trades = []
+                for trade in combo_trades:
+                    # Handle string dates from cache
+                    if isinstance(trade, dict) and isinstance(trade.get('Date'), str):
+                        try:
+                            from datetime import datetime as dt
+                            trade['Date'] = dt.strptime(trade['Date'], '%Y-%m-%d')
+                        except:
+                            pass
+                    
+                    # Format dates
+                    if isinstance(trade, dict):
+                        if isinstance(trade.get('BuyDate'), datetime):
+                            buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                        elif isinstance(trade.get('BuyDate'), str):
+                            buy_date = trade['BuyDate']
+                        else:
+                            buy_date = str(trade.get('BuyDate', ''))
+                        
+                        if isinstance(trade.get('SellDate'), datetime):
+                            sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                        elif isinstance(trade.get('SellDate'), str):
+                            sell_date = trade['SellDate']
+                        else:
+                            sell_date = str(trade.get('SellDate', ''))
+                        
+                        # Handle buy/sell pairs format
+                        if 'Buy/Sell' in trade:
+                            # This is a buy/sell pair - skip individual entries, they'll be converted
+                            continue
+                        
+                        # Get prices
+                        buy_price = trade.get('BuyPrice') or trade.get('buy_price') or 0
+                        sell_price = trade.get('SellPrice') or trade.get('sell_price') or 0
+                        
+                        # If we have a single Price field, try to determine if it's buy or sell
+                        if buy_price == 0 and sell_price == 0 and 'Price' in trade:
+                            # Can't determine from single entry, skip
+                            continue
+                        
+                        formatted_trades.append({
+                            'BuyDate': buy_date,
+                            'SellDate': sell_date,
+                            'BuyPrice': f"{buy_price:.2f}" if isinstance(buy_price, (int, float)) else str(buy_price),
+                            'SellPrice': f"{sell_price:.2f}" if isinstance(sell_price, (int, float)) else str(sell_price),
+                            'PreTaxReturn': f"{trade.get('PreTaxReturn', trade.get('PreTaxReturn', 0)):.4f}",
+                            'HoldTime': trade.get('HoldTime', trade.get('hold_time', 0)),
+                            'GainDollars': f"${trade.get('GainDollars', trade.get('gain_dollars', 0)):.2f}",
+                            'SMA_A': trade.get('SMA_A', combo.get('sma_a', '')),
+                            'SMA_B': trade.get('SMA_B', combo.get('sma_b', ''))
+                        })
+                
+                # If we have buy/sell pairs, convert them
+                if not formatted_trades and combo_trades and len(combo_trades) > 0:
+                    if isinstance(combo_trades[0], dict) and 'Buy/Sell' in combo_trades[0]:
+                        # Convert using the conversion function
+                        converted = convert_besttrades_to_trades(combo_trades)
+                        for trade in converted:
+                            if isinstance(trade.get('BuyDate'), datetime):
+                                buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
+                            else:
+                                buy_date = str(trade.get('BuyDate', ''))
+                            if isinstance(trade.get('SellDate'), datetime):
+                                sell_date = trade['SellDate'].strftime('%Y-%m-%d')
+                            else:
+                                sell_date = str(trade.get('SellDate', ''))
+                            formatted_trades.append({
+                                'BuyDate': buy_date,
+                                'SellDate': sell_date,
+                                'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
+                                'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
+                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
+                                'HoldTime': trade.get('HoldTime', 0),
+                                'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
+                                'SMA_A': trade.get('SMA_A', combo.get('sma_a', '')),
+                                'SMA_B': trade.get('SMA_B', combo.get('sma_b', ''))
+                            })
+                
+                # Set up columns
+                columns = ['BuyDate', 'SellDate', 
+                          'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
+                          'GainDollars', 'SMA_A', 'SMA_B']
+                trades_tree["columns"] = columns
+                for col in columns:
+                    trades_tree.heading(col, text=col)
+                    trades_tree.column(col, anchor="center", width=100)
+                
+                # Insert trades
+                for trade in formatted_trades:
+                    values = [str(trade.get(col, '')) for col in columns]
+                    trades_tree.insert("", "end", values=values)
+                
+                status_label = ttk.Label(trades_tab, text=f"✓ Showing {len(formatted_trades)} trades for this combination")
+                status_label.pack(pady=5)
+            else:
+                ttk.Label(trades_tab, text="No trades available for this combination", font=("Arial", 12)).pack(pady=20)
         
         # Parameter stability tab
         stability_tab = ttk.Frame(detail_notebook)
@@ -2435,94 +2845,130 @@ def view_batch_results():
             
             return tab, tree, status_label, explanation_label
         
-        # Create separate tabs for training and walk-forward trades if in walk-forward mode
-        if has_wf and result.get("walk_forward_mode", False):
-            # Training Trades tab
-            training_tab, training_tree, training_status, training_explanation = create_trades_tab("Training Trades")
-            
-            # Walk-Forward Test Trades tab
-            wf_tab, wf_tree, wf_status, wf_explanation = create_trades_tab("Walk-Forward Test Trades")
-            
-            # For backward compatibility, also create a combined "Trades" tab
-            trades_tab, trades_detail_tree, trades_status_label, trades_explanation_detail = create_trades_tab("Trades (Combined)")
-        else:
-            # Regular backtest - just one Trades tab
-            trades_tab, trades_detail_tree, trades_status_label, trades_explanation_detail = create_trades_tab("Trades")
-            training_tab = training_tree = training_status = training_explanation = None
-            wf_tab = wf_tree = wf_status = wf_explanation = None
+        # Create a single Trades tab (combined for walk-forward mode)
+        trades_tab, trades_detail_tree, trades_status_label, trades_explanation_detail = create_trades_tab("Trades")
         
         # Helper function to convert besttrades format (buy/sell pairs) to expected format
         def convert_besttrades_to_trades(besttrades_list):
             """Convert besttrades format (separate buy/sell entries) to complete trade format."""
+            print(f"[DEBUG] convert_besttrades_to_trades: Input length: {len(besttrades_list) if isinstance(besttrades_list, list) else 'N/A'}")
+            
             if not besttrades_list:
+                print(f"[DEBUG] convert_besttrades_to_trades: Empty list, returning []")
                 return []
             
             # Handle case where it might be a single dict or other format
             if not isinstance(besttrades_list, list):
+                print(f"[DEBUG] convert_besttrades_to_trades: Not a list, type: {type(besttrades_list)}")
                 return []
             
             # Check if already in the expected format (has BuyDate/SellDate)
             if len(besttrades_list) > 0 and isinstance(besttrades_list[0], dict):
                 first_trade = besttrades_list[0]
+                print(f"[DEBUG] convert_besttrades_to_trades: First trade keys: {list(first_trade.keys())}")
+                
                 if 'BuyDate' in first_trade or ('BuyPrice' in first_trade and 'SellPrice' in first_trade):
                     # Already in correct format
+                    print(f"[DEBUG] convert_besttrades_to_trades: Already in correct format, returning as-is")
                     return besttrades_list
                 # Also check for alternative field names
                 if 'Buy/Sell' not in first_trade:
                     # Might already be in correct format but with different field names
+                    print(f"[DEBUG] convert_besttrades_to_trades: No Buy/Sell field, might be correct format, returning as-is")
                     return besttrades_list
             
             # Convert from buy/sell pair format
+            # The issue: TradeNumbers are sequential (1, 2, 3, 4...) but buy is 1, sell is 2, etc.
+            # We need to pair consecutive buy/sell entries, not match by TradeNumber
+            print(f"[DEBUG] convert_besttrades_to_trades: Converting from buy/sell pairs format")
             converted_trades = []
-            buy_trades = {}
+            current_buy = None
             
-            for trade in besttrades_list:
+            for idx, trade in enumerate(besttrades_list):
                 if not isinstance(trade, dict):
+                    print(f"[DEBUG] convert_besttrades_to_trades: Trade {idx} is not a dict: {type(trade)}")
                     continue
+                
+                if idx < 3:
+                    print(f"[DEBUG] convert_besttrades_to_trades: Trade {idx} keys: {list(trade.keys())}")
+                    print(f"[DEBUG] convert_besttrades_to_trades: Trade {idx} Buy/Sell: {trade.get('Buy/Sell')}, TradeNumber: {trade.get('TradeNumber')}, Price: {trade.get('Price')}")
                     
                 buy_sell = trade.get('Buy/Sell', 0)
-                trade_num = trade.get('TradeNumber', 0)
                 
                 if buy_sell == 1:  # Buy trade
-                    buy_trades[trade_num] = {
+                    # Store the buy trade info
+                    current_buy = {
                         'Date': trade.get('Date'),
-                        'Price': trade.get('Price', 0)
+                        'Price': trade.get('Price', 0),
+                        'SMA_A': trade.get('SMA_A', ''),
+                        'SMA_B': trade.get('SMA_B', '')
                     }
+                    if idx < 3:
+                        print(f"[DEBUG] convert_besttrades_to_trades: Stored buy trade: Date={current_buy['Date']}, Price={current_buy['Price']}")
                 elif buy_sell == -1:  # Sell trade
-                    if trade_num in buy_trades:
-                        buy_info = buy_trades[trade_num]
+                    if current_buy is not None:
                         # Get gain dollars - try different possible field names
                         gain_dollars = trade.get('PreTax Running P/L', 0)
                         if gain_dollars == 0 and 'GainDollars' in trade:
                             gain_dollars = trade.get('GainDollars', 0)
                         
-                        converted_trades.append({
+                        # Calculate hold time if not present
+                        hold_time = trade.get('HoldTime', 0)
+                        if hold_time == 0 and current_buy.get('Date') and trade.get('Date'):
+                            try:
+                                from pandas import Timestamp
+                                if isinstance(current_buy['Date'], Timestamp) and isinstance(trade.get('Date'), Timestamp):
+                                    hold_time = (trade.get('Date') - current_buy['Date']).days
+                            except:
+                                pass
+                        
+                        converted_trade = {
                             'Date': trade.get('Date'),  # Use sell date as trade date
-                            'BuyDate': buy_info.get('Date'),
+                            'BuyDate': current_buy.get('Date'),
                             'SellDate': trade.get('Date'),
-                            'BuyPrice': buy_info.get('Price', 0),
+                            'BuyPrice': current_buy.get('Price', 0),
                             'SellPrice': trade.get('Price', 0),
                             'PreTaxReturn': trade.get('PreTaxReturn', 0),
-                            'HoldTime': trade.get('HoldTime', 0),
+                            'HoldTime': hold_time,
                             'GainDollars': gain_dollars,
-                            'SMA_A': trade.get('SMA_A', ''),
-                            'SMA_B': trade.get('SMA_B', '')
-                        })
-                        del buy_trades[trade_num]
+                            'SMA_A': current_buy.get('SMA_A', trade.get('SMA_A', '')),
+                            'SMA_B': current_buy.get('SMA_B', trade.get('SMA_B', ''))
+                        }
+                        converted_trades.append(converted_trade)
+                        if idx < 3:
+                            print(f"[DEBUG] convert_besttrades_to_trades: Created converted trade {len(converted_trades)}: BuyPrice={converted_trade['BuyPrice']}, SellPrice={converted_trade['SellPrice']}")
+                        current_buy = None  # Reset for next pair
+                    else:
+                        print(f"[DEBUG] convert_besttrades_to_trades: WARNING - Sell trade at index {idx} has no matching buy trade")
             
+            print(f"[DEBUG] convert_besttrades_to_trades: Conversion complete, returning {len(converted_trades)} trades")
             return converted_trades
         
         # Populate trades
         if has_wf and result.get("walk_forward_mode", False):
+            print(f"[DEBUG] show_stock_detail: Walk-forward mode detected")
+            print(f"[DEBUG] show_stock_detail: result keys: {list(result.keys())}")
+            
             # Try new simple structure first
             training_trades = result.get('training_trades', [])
             walk_forward_trades = result.get('walk_forward_trades', [])
+            
+            print(f"[DEBUG] show_stock_detail: training_trades type: {type(training_trades)}, length: {len(training_trades) if isinstance(training_trades, list) else 'N/A'}")
+            print(f"[DEBUG] show_stock_detail: walk_forward_trades type: {type(walk_forward_trades)}, length: {len(walk_forward_trades) if isinstance(walk_forward_trades, list) else 'N/A'}")
+            
+            if training_trades and isinstance(training_trades, list) and len(training_trades) > 0:
+                print(f"[DEBUG] show_stock_detail: First training trade keys: {list(training_trades[0].keys()) if isinstance(training_trades[0], dict) else 'NOT A DICT'}")
+            
+            if walk_forward_trades and isinstance(walk_forward_trades, list) and len(walk_forward_trades) > 0:
+                print(f"[DEBUG] show_stock_detail: First walk-forward trade keys: {list(walk_forward_trades[0].keys()) if isinstance(walk_forward_trades[0], dict) else 'NOT A DICT'}")
             
             # Convert training_trades if they're in besttrades format (buy/sell pairs)
             if training_trades and isinstance(training_trades, list) and len(training_trades) > 0:
                 # Check if first trade is in besttrades format (has 'Buy/Sell' key)
                 if isinstance(training_trades[0], dict) and 'Buy/Sell' in training_trades[0]:
+                    print(f"[DEBUG] show_stock_detail: Converting training_trades from buy/sell pairs format")
                     training_trades = convert_besttrades_to_trades(training_trades)
+                    print(f"[DEBUG] show_stock_detail: After conversion, training_trades length: {len(training_trades)}")
             
             # Fallback: if training_trades is empty or None, try to get from besttrades
             # In walk-forward mode, besttrades contains the training period trades
@@ -2660,17 +3106,37 @@ def view_batch_results():
                 if not trades_list or len(trades_list) == 0:
                     status_label.config(text=f"No {period_name} trades available.")
                     explanation_label.config(text="")
+                    print(f"[DEBUG] populate_trades_tree: No {period_name} trades available (trades_list: {trades_list})")
                     return
+                
+                # DEBUG: Print first trade structure
+                if len(trades_list) > 0:
+                    first_trade = trades_list[0]
+                    print(f"[DEBUG] populate_trades_tree ({period_name}): First trade keys: {list(first_trade.keys()) if isinstance(first_trade, dict) else 'NOT A DICT'}")
+                    print(f"[DEBUG] populate_trades_tree ({period_name}): First trade type: {type(first_trade)}")
+                    if isinstance(first_trade, dict):
+                        print(f"[DEBUG] populate_trades_tree ({period_name}): First trade sample: {first_trade}")
+                        # Check for common price field names
+                        price_fields = ['BuyPrice', 'buy_price', 'Buy_Price', 'Price', 'price', 'Buy', 'buy']
+                        for field in price_fields:
+                            if field in first_trade:
+                                print(f"[DEBUG] Found price field '{field}': {first_trade[field]} (type: {type(first_trade[field])})")
                 
                 # Format trades for display
                 formatted_trades = []
-                for trade in trades_list:
-                    # Format dates
-                    if isinstance(trade.get('Date'), datetime):
-                        trade_date = trade['Date'].strftime('%Y-%m-%d')
-                    else:
-                        trade_date = str(trade.get('Date', ''))
+                for idx, trade in enumerate(trades_list):
+                    if not isinstance(trade, dict):
+                        print(f"[DEBUG] Trade {idx} is not a dict: {type(trade)}")
+                        continue
                     
+                    # DEBUG: Print trade structure for first few trades
+                    if idx < 3:
+                        print(f"[DEBUG] Trade {idx} keys: {list(trade.keys())}")
+                        print(f"[DEBUG] Trade {idx} BuyPrice: {trade.get('BuyPrice', 'NOT FOUND')} (type: {type(trade.get('BuyPrice'))})")
+                        print(f"[DEBUG] Trade {idx} SellPrice: {trade.get('SellPrice', 'NOT FOUND')} (type: {type(trade.get('SellPrice'))})")
+                        print(f"[DEBUG] Trade {idx} Price: {trade.get('Price', 'NOT FOUND')} (type: {type(trade.get('Price'))})")
+                    
+                    # Format dates
                     if isinstance(trade.get('BuyDate'), datetime):
                         buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
                     else:
@@ -2681,21 +3147,32 @@ def view_batch_results():
                     else:
                         sell_date = str(trade.get('SellDate', ''))
                     
+                    # Try multiple field name variations for prices
+                    buy_price = trade.get('BuyPrice') or trade.get('buy_price') or trade.get('Buy_Price')
+                    sell_price = trade.get('SellPrice') or trade.get('sell_price') or trade.get('Sell_Price')
+                    
+                    # Handle case where we have a single 'Price' field (buy/sell pairs format that wasn't converted)
+                    # In this case, we can't determine buy/sell from a single entry, so we skip it
+                    # (these should have been converted already by convert_besttrades_to_trades)
+                    if buy_price is None and sell_price is None and 'Price' in trade and 'Buy/Sell' in trade:
+                        # This is a buy/sell pair entry that wasn't converted - skip it
+                        print(f"[DEBUG] populate_trades_tree: Skipping unconverted buy/sell pair entry at index {idx} (Buy/Sell={trade.get('Buy/Sell')})")
+                        continue
+                    
                     formatted_trades.append({
-                        'Trade Date': trade_date,
                         'BuyDate': buy_date,
                         'SellDate': sell_date,
-                        'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
-                        'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                        'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.4f}",
-                        'HoldTime': trade.get('HoldTime', 0),
-                        'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
-                        'SMA_A': trade.get('SMA_A', ''),
-                        'SMA_B': trade.get('SMA_B', '')
+                        'BuyPrice': f"{buy_price:.2f}" if isinstance(buy_price, (int, float)) else str(buy_price),
+                        'SellPrice': f"{sell_price:.2f}" if isinstance(sell_price, (int, float)) else str(sell_price),
+                        'PreTaxReturn': f"{trade.get('PreTaxReturn', trade.get('PreTaxReturn', 0)):.4f}",
+                        'HoldTime': trade.get('HoldTime', trade.get('hold_time', 0)),
+                        'GainDollars': f"${trade.get('GainDollars', trade.get('gain_dollars', 0)):.2f}",
+                        'SMA_A': trade.get('SMA_A', trade.get('sma_a', '')),
+                        'SMA_B': trade.get('SMA_B', trade.get('sma_b', ''))
                     })
                 
                 # Set up columns
-                columns = ['Trade Date', 'BuyDate', 'SellDate', 
+                columns = ['BuyDate', 'SellDate', 
                           'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
                           'GainDollars', 'SMA_A', 'SMA_B']
                 tree["columns"] = columns
@@ -2711,28 +3188,38 @@ def view_batch_results():
                 status_label.config(text=f"✓ Showing {len(formatted_trades)} {period_name} trades")
                 explanation_label.config(text="")
             
-            # Handle walk-forward mode with separate tabs
-            if result.get('walk_forward_mode') and training_tree and wf_tree:
+            # Handle walk-forward mode - populate combined tab
+            if result.get('walk_forward_mode'):
+                print(f"[DEBUG] show_stock_detail: Populating combined trades tab for walk-forward mode")
+                
                 # Ensure we have the trades - re-check and convert if needed
                 # Check training_trades
                 if not training_trades or (isinstance(training_trades, list) and len(training_trades) == 0):
+                    print(f"[DEBUG] show_stock_detail: training_trades is empty, checking besttrades")
                     # Try to get from besttrades (which contains training trades in walk-forward mode)
                     if result.get('besttrades'):
                         besttrades_raw = result.get('besttrades', [])
+                        print(f"[DEBUG] show_stock_detail: besttrades_raw length: {len(besttrades_raw) if isinstance(besttrades_raw, list) else 'N/A'}")
                         if besttrades_raw and len(besttrades_raw) > 0:
                             # Check if already in correct format
                             if isinstance(besttrades_raw[0], dict):
+                                print(f"[DEBUG] show_stock_detail: besttrades_raw[0] keys: {list(besttrades_raw[0].keys())}")
                                 if 'BuyDate' in besttrades_raw[0] or 'BuyPrice' in besttrades_raw[0]:
                                     # Already in correct format
+                                    print(f"[DEBUG] show_stock_detail: besttrades already in correct format")
                                     training_trades = besttrades_raw
                                 elif 'Buy/Sell' in besttrades_raw[0]:
                                     # Need conversion
+                                    print(f"[DEBUG] show_stock_detail: Converting besttrades from buy/sell pairs")
                                     converted = convert_besttrades_to_trades(besttrades_raw)
                                     if converted and len(converted) > 0:
+                                        print(f"[DEBUG] show_stock_detail: Conversion successful, {len(converted)} trades")
                                         training_trades = converted
                                     else:
+                                        print(f"[DEBUG] show_stock_detail: Conversion failed or empty, using raw")
                                         training_trades = besttrades_raw
                                 else:
+                                    print(f"[DEBUG] show_stock_detail: Unknown besttrades format, using as-is")
                                     training_trades = besttrades_raw
                             else:
                                 training_trades = besttrades_raw
@@ -2740,24 +3227,16 @@ def view_batch_results():
                 # Also check if training_trades needs conversion
                 if training_trades and isinstance(training_trades, list) and len(training_trades) > 0:
                     if isinstance(training_trades[0], dict) and 'Buy/Sell' in training_trades[0]:
+                        print(f"[DEBUG] show_stock_detail: training_trades needs conversion from buy/sell pairs")
                         converted = convert_besttrades_to_trades(training_trades)
                         if converted and len(converted) > 0:
+                            print(f"[DEBUG] show_stock_detail: training_trades conversion successful")
                             training_trades = converted
                 
-                # Populate training trades tab
-                populate_trades_tree(training_tree, training_trades, training_status, training_explanation, "TRAINING")
-                
-                # Populate walk-forward test trades tab
-                populate_trades_tree(wf_tree, walk_forward_trades, wf_status, wf_explanation, "WALK-FORWARD TEST")
-                
-                # Also populate combined tab for backward compatibility
+                # Populate combined tab with all trades
                 all_trades = []
                 if training_trades and len(training_trades) > 0:
                     for trade in training_trades:
-                        if isinstance(trade.get('Date'), datetime):
-                            trade_date = trade['Date'].strftime('%Y-%m-%d')
-                        else:
-                            trade_date = str(trade.get('Date', ''))
                         if isinstance(trade.get('BuyDate'), datetime):
                             buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
                         else:
@@ -2768,7 +3247,6 @@ def view_batch_results():
                             sell_date = str(trade.get('SellDate', ''))
                         all_trades.append({
                             'Period': 'Training',
-                            'Trade Date': trade_date,
                             'BuyDate': buy_date,
                             'SellDate': sell_date,
                             'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
@@ -2783,17 +3261,13 @@ def view_batch_results():
                 if (training_trades and len(training_trades) > 0) and (walk_forward_trades and len(walk_forward_trades) > 0):
                     all_trades.append({
                         'Period': '────────────────────────────────────',
-                        'Trade Date': '', 'BuyDate': '', 'SellDate': '',
+                        'BuyDate': '', 'SellDate': '',
                         'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '',
                         'HoldTime': '', 'GainDollars': '', 'SMA_A': '', 'SMA_B': ''
                     })
                 
                 if walk_forward_trades and len(walk_forward_trades) > 0:
                     for trade in walk_forward_trades:
-                        if isinstance(trade.get('Date'), datetime):
-                            trade_date = trade['Date'].strftime('%Y-%m-%d')
-                        else:
-                            trade_date = str(trade.get('Date', ''))
                         if isinstance(trade.get('BuyDate'), datetime):
                             buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
                         else:
@@ -2804,7 +3278,6 @@ def view_batch_results():
                             sell_date = str(trade.get('SellDate', ''))
                         all_trades.append({
                             'Period': 'Walk-Forward Test',
-                            'Trade Date': trade_date,
                             'BuyDate': buy_date,
                             'SellDate': sell_date,
                             'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
@@ -2816,7 +3289,7 @@ def view_batch_results():
                             'SMA_B': trade.get('SMA_B', '')
                         })
                 
-                columns = ['Period', 'Trade Date', 'BuyDate', 'SellDate', 
+                columns = ['Period', 'BuyDate', 'SellDate', 
                           'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
                           'GainDollars', 'SMA_A', 'SMA_B']
                 trades_detail_tree["columns"] = columns
@@ -4569,42 +5042,38 @@ def create_ui():
     )
     cancel_button.pack()
     
-    trade_table_button = ttk.Button(button_frame, text="Look at Trade Table", command=view_trade_table, style="Action.TButton")
-    trade_table_button.pack(side="left", padx=10)
-    
-    export_button = ttk.Button(button_frame, text="Export Results to CSV", command=export_results_to_csv, style="Action.TButton")
-    export_button.pack(side="left", padx=10)
-    
-    view_cache_button = ttk.Button(button_frame, text="View Cached Backtests", command=view_cached_backtests, style="Action.TButton")
-    view_cache_button.pack(side="left", padx=10)
-    
-    scoring_config_button = ttk.Button(button_frame, text="Scoring Config", command=open_scoring_config, style="Action.TButton")
-    scoring_config_button.pack(side="left", padx=10)
-    
-    def view_or_load_batch():
-        """Smart batch view - shows current results if available, otherwise prompts to load from folder."""
+    # Primary results view button - handles both single stock and batch
+    def view_results():
+        """Open comprehensive results view - handles current results or prompts to load cached."""
         global algorithm_results
         
-        # Check if we have current results with multiple stocks
+        # Check if we have current results
         if algorithm_results:
             valid_results = {k: v for k, v in algorithm_results.items() if "Error" not in v}
-            if len(valid_results) >= 2:
-                # We have a batch - show it
+            if len(valid_results) > 0:
+                # We have results - show them
                 view_batch_results()
                 return
         
-        # No current batch - offer to load from folder
+        # No current results - offer to load from cache
         response = messagebox.askyesno(
-            "No Current Batch Results",
-            "No batch results are currently available.\n\n"
-            "Would you like to load a batch from a saved folder?\n\n"
-            "Click 'Yes' to select a batch folder, or 'No' to cancel."
+            "No Current Results",
+            "No results are currently available.\n\n"
+            "Would you like to load results from cached backtests?\n\n"
+            "Click 'Yes' to select a cache folder/file, or 'No' to cancel."
         )
         if response:
             load_batch_from_folder()
     
-    batch_view_button = ttk.Button(button_frame, text="View Batch Results", command=view_or_load_batch, style="Action.TButton")
-    batch_view_button.pack(side="left", padx=10)
+    view_results_button = ttk.Button(button_frame, text="View Results", command=view_results, style="Action.TButton")
+    view_results_button.pack(side="left", padx=10)
+    
+    # Secondary buttons
+    export_button = ttk.Button(button_frame, text="Export to CSV", command=export_results_to_csv, style="Action.TButton")
+    export_button.pack(side="left", padx=10)
+    
+    scoring_config_button = ttk.Button(button_frame, text="Scoring Config", command=open_scoring_config, style="Action.TButton")
+    scoring_config_button.pack(side="left", padx=10)
 
     # Log Frame
     log_frame = ttk.LabelFrame(main_frame, text="Logs", padding="5")
