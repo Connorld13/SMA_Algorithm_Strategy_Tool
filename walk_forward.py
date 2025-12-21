@@ -67,11 +67,110 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     data_min = data['Date'].min()
     data_max = data['Date'].max()
     
-    if train_start < data_min:
-        raise ValueError(f"Not enough data for walk-forward. Training period requires data from {train_start.date()}, but earliest data is {data_min.date()}.")
+    print(f"\n[WALK-FORWARD INITIAL CALCULATION DEBUG]")
+    print(f"  Input end_date: {end_date_dt.date()}")
+    print(f"  Data date range: {data_min.date()} to {data_max.date()}")
+    print(f"  Training period input: {backtest_period_years} years, {backtest_period_months} months")
+    print(f"  Walk-forward period input: {walk_forward_period_years} years, {walk_forward_period_months} months")
+    print(f"  Initial test_end: {test_end.date()}")
+    print(f"  Initial test_start: {test_start.date()}")
+    print(f"  Initial train_end: {train_end.date()}")
+    print(f"  Initial train_start: {train_start.date()}")
+    print(f"  test_period (relativedelta): years={test_period.years}, months={test_period.months}, days={test_period.days}")
+    print(f"  train_period (relativedelta): years={train_period.years}, months={train_period.months}, days={train_period.days}")
     
+    if train_start < data_min:
+        print(f"  ❌ Initial calculation: train_start ({train_start.date()}) < data_min ({data_min.date()})")
+        raise ValueError(f"Not enough data for walk-forward. Training period requires data from {train_start.date()}, but earliest data is {data_min.date()}.")
+    else:
+        print(f"  ✓ Initial calculation: train_start ({train_start.date()}) >= data_min ({data_min.date()})")
+    
+    # If test_end is beyond available data, adjust it to use latest available data
     if test_end > data_max:
-        raise ValueError(f"Not enough data for walk-forward. Test period requires data until {test_end.date()}, but latest data is {data_max.date()}.")
+        print(f"\n[WALK-FORWARD ADJUSTMENT DEBUG]")
+        print(f"  ⚠️  test_end ({test_end.date()}) > data_max ({data_max.date()})")
+        print(f"  Adjusting test_end from {test_end.date()} to {data_max.date()}")
+        old_test_end = test_end
+        old_test_start = test_start
+        old_train_end = train_end
+        old_train_start = train_start
+        
+        test_end = data_max
+        # Recalculate test_start to maintain the walk-forward period length
+        test_start = test_end - test_period + timedelta(days=1)
+        # Recalculate train_end to ensure no overlap
+        train_end = test_start - timedelta(days=1)
+        # Recalculate train_start to maintain training period length
+        train_start = train_end - train_period + timedelta(days=1)
+        
+        print(f"  After adjustment:")
+        print(f"    test_end: {old_test_end.date()} → {test_end.date()} (changed by {(test_end - old_test_end).days} days)")
+        print(f"    test_start: {old_test_start.date()} → {test_start.date()} (changed by {(test_start - old_test_start).days} days)")
+        print(f"    train_end: {old_train_end.date()} → {train_end.date()} (changed by {(train_end - old_train_end).days} days)")
+        print(f"    train_start: {old_train_start.date()} → {train_start.date()} (changed by {(train_start - old_train_start).days} days)")
+        print(f"  Checking if train_start ({train_start.date()}) >= data_min ({data_min.date()}): {train_start >= data_min}")
+        print(f"  train_start type: {type(train_start)}, data_min type: {type(data_min)}")
+        
+        # Verify we still have enough data after adjustment
+        if train_start < data_min:
+            print(f"  ❌ After adjustment: train_start ({train_start.date()}) < data_min ({data_min.date()})")
+            print(f"  Difference: {(data_min - train_start).days} days")
+            print(f"  This means we need to adjust train_start or reduce the training period")
+            print(f"  Attempting to adjust train_start to data_min and recalculate...")
+            
+            # Try alternative: start from data_min, calculate forward, then adjust test_end if needed
+            train_start_alt = data_min
+            train_end_alt = train_start_alt + train_period - timedelta(days=1)
+            test_start_alt = train_end_alt + timedelta(days=1)
+            test_end_alt = test_start_alt + test_period - timedelta(days=1)
+            
+            print(f"  Alternative calculation (train_start = data_min):")
+            print(f"    train_start: {train_start_alt.date()}")
+            print(f"    train_end: {train_end_alt.date()}")
+            print(f"    test_start: {test_start_alt.date()}")
+            print(f"    test_end: {test_end_alt.date()}")
+            print(f"    test_end <= data_max: {test_end_alt <= data_max}")
+            
+            # If test_end exceeds data_max, adjust it and recalculate backward
+            if test_end_alt > data_max:
+                print(f"  ⚠️  test_end ({test_end_alt.date()}) > data_max ({data_max.date()}), adjusting...")
+                test_end_alt = data_max
+                test_start_alt = test_end_alt - test_period + timedelta(days=1)
+                train_end_alt = test_start_alt - timedelta(days=1)
+                train_start_alt = train_end_alt - train_period + timedelta(days=1)
+                
+                print(f"  After test_end adjustment:")
+                print(f"    train_start: {train_start_alt.date()}")
+                print(f"    train_end: {train_end_alt.date()}")
+                print(f"    test_start: {test_start_alt.date()}")
+                print(f"    test_end: {test_end_alt.date()}")
+                print(f"    train_start >= data_min: {train_start_alt >= data_min}")
+                
+                # If train_start is still before data_min, we need to use all available data
+                if train_start_alt < data_min:
+                    print(f"  ⚠️  Still not enough data. Using all available data with adjusted periods:")
+                    train_start_alt = data_min
+                    # Calculate forward from train_start, but cap test_end at data_max
+                    train_end_alt = train_start_alt + train_period - timedelta(days=1)
+                    test_start_alt = train_end_alt + timedelta(days=1)
+                    test_end_alt = min(test_start_alt + test_period - timedelta(days=1), data_max)
+                    
+                    print(f"    train_start: {train_start_alt.date()} (using all available data)")
+                    print(f"    train_end: {train_end_alt.date()}")
+                    print(f"    test_start: {test_start_alt.date()}")
+                    print(f"    test_end: {test_end_alt.date()} (capped at data_max)")
+                    print(f"    Note: Periods may be slightly shorter than requested due to data limitations")
+            
+            if train_start_alt >= data_min:
+                print(f"  ✓ Alternative calculation works! Using adjusted dates.")
+                train_start = train_start_alt
+                train_end = train_end_alt
+                test_start = test_start_alt
+                test_end = test_end_alt
+            else:
+                raise ValueError(f"Not enough data for walk-forward after adjusting for available data. Training period requires data from {train_start_alt.date()}, but earliest data is {data_min.date()}.")
+        else:
+            print(f"  ✓ After adjustment: train_start ({train_start.date()}) >= data_min ({data_min.date()})")
     
     if progress_callback:
         progress_callback(10)
@@ -80,6 +179,8 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     print(f"\n[WALK-FORWARD TIME DEBUG]")
     print(f"  Input end_date: {end_date_dt.date()}")
     print(f"  Data date range: {data['Date'].min().date()} to {data['Date'].max().date()}")
+    if test_end != end_date_dt:
+        print(f"  ⚠️  Adjusted test_end from {end_date_dt.date()} to {test_end.date()} (using latest available data)")
     print(f"  Training period input: {backtest_period_years} years, {backtest_period_months} months")
     print(f"  Walk-forward period input: {walk_forward_period_years} years, {walk_forward_period_months} months")
     print(f"  Calculated Training Period: {train_start.date()} to {train_end.date()}")
@@ -223,24 +324,12 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     
     walk_forward_score = scoring.calculate_backtest_score(test_result_formatted, scoring_config)
     
-    # Create all_combinations list (just the best one for now, but formatted for compatibility)
-    all_combinations = [{
-        'sma_a': best_a,
-        'sma_b': best_b,
-        'taxed_return': test_result.get('return', 0.0),
-        'better_off': 0.0,
-        'win_rate': test_result.get('winning_trades', 0) / max(test_result.get('trade_count', 1), 1),
-        'trade_count': test_result.get('trade_count', 0),
-        'winning_trades': test_result.get('winning_trades', 0),
-        'losing_trades': test_result.get('losing_trades', 0),
-        'max_drawdown': test_result.get('max_drawdown', 0.0),
-        'avg_hold_time': test_result.get('total_hold_time', 0.0) / max(test_result.get('trade_count', 1), 1),
-        'combined_score': walk_forward_score
-    }]
+    # Use all training combinations (not just the best one)
+    # This allows the UI to show all combinations in the "All Combinations" tab
+    all_combinations = all_combinations_train
     
-    # Find best combination (only one in simple mode)
-    best_combo = all_combinations[0] if all_combinations else None
-    best_idx = 0
+    # Find best combination index
+    best_idx = best_train_idx
     
     # Format output similar to regular algorithm
     outputresults1 = {
@@ -301,7 +390,7 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
         "param_stability": param_stability,
         "besttrades": training_trades,  # Training period trades
         "all_combinations": all_combinations,
-        "best_combination_idx": 0,
+        "best_combination_idx": best_idx,
         "noalgoreturn": train_result.get("noalgoreturn", 0.0),
         "walk_forward_mode": True,
         "segments": 1,  # Simple mode has 1 segment
@@ -524,11 +613,110 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     data_min = data['Date'].min()
     data_max = data['Date'].max()
     
-    if train_start < data_min:
-        return {"Error": f"Not enough data for walk-forward. Training period requires data from {train_start.date()}, but earliest data is {data_min.date()}."}
+    print(f"\n[BATCH WALK-FORWARD INITIAL CALCULATION DEBUG]")
+    print(f"  Input end_date: {end_date_dt.date()}")
+    print(f"  Data date range: {data_min.date()} to {data_max.date()}")
+    print(f"  Training period input: {backtest_period_years} years, {backtest_period_months} months")
+    print(f"  Walk-forward period input: {walk_forward_period_years} years, {walk_forward_period_months} months")
+    print(f"  Initial test_end: {test_end.date()}")
+    print(f"  Initial test_start: {test_start.date()}")
+    print(f"  Initial train_end: {train_end.date()}")
+    print(f"  Initial train_start: {train_start.date()}")
+    print(f"  test_period (relativedelta): years={test_period.years}, months={test_period.months}, days={test_period.days}")
+    print(f"  train_period (relativedelta): years={train_period.years}, months={train_period.months}, days={train_period.days}")
     
+    if train_start < data_min:
+        print(f"  ❌ Initial calculation: train_start ({train_start.date()}) < data_min ({data_min.date()})")
+        return {"Error": f"Not enough data for walk-forward. Training period requires data from {train_start.date()}, but earliest data is {data_min.date()}."}
+    else:
+        print(f"  ✓ Initial calculation: train_start ({train_start.date()}) >= data_min ({data_min.date()})")
+    
+    # If test_end is beyond available data, adjust it to use latest available data
     if test_end > data_max:
-        return {"Error": f"Not enough data for walk-forward. Test period requires data until {test_end.date()}, but latest data is {data_max.date()}."}
+        print(f"\n[BATCH WALK-FORWARD ADJUSTMENT DEBUG]")
+        print(f"  ⚠️  test_end ({test_end.date()}) > data_max ({data_max.date()})")
+        print(f"  Adjusting test_end from {test_end.date()} to {data_max.date()}")
+        old_test_end = test_end
+        old_test_start = test_start
+        old_train_end = train_end
+        old_train_start = train_start
+        
+        test_end = data_max
+        # Recalculate test_start to maintain the walk-forward period length
+        test_start = test_end - test_period + timedelta(days=1)
+        # Recalculate train_end to ensure no overlap
+        train_end = test_start - timedelta(days=1)
+        # Recalculate train_start to maintain training period length
+        train_start = train_end - train_period + timedelta(days=1)
+        
+        print(f"  After adjustment:")
+        print(f"    test_end: {old_test_end.date()} → {test_end.date()} (changed by {(test_end - old_test_end).days} days)")
+        print(f"    test_start: {old_test_start.date()} → {test_start.date()} (changed by {(test_start - old_test_start).days} days)")
+        print(f"    train_end: {old_train_end.date()} → {train_end.date()} (changed by {(train_end - old_train_end).days} days)")
+        print(f"    train_start: {old_train_start.date()} → {train_start.date()} (changed by {(train_start - old_train_start).days} days)")
+        print(f"  Checking if train_start ({train_start.date()}) >= data_min ({data_min.date()}): {train_start >= data_min}")
+        print(f"  train_start type: {type(train_start)}, data_min type: {type(data_min)}")
+        
+        # Verify we still have enough data after adjustment
+        if train_start < data_min:
+            print(f"  ❌ After adjustment: train_start ({train_start.date()}) < data_min ({data_min.date()})")
+            print(f"  Difference: {(data_min - train_start).days} days")
+            print(f"  This means we need to adjust train_start or reduce the training period")
+            print(f"  Attempting to adjust train_start to data_min and recalculate...")
+            
+            # Try alternative: start from data_min, calculate forward, then adjust test_end if needed
+            train_start_alt = data_min
+            train_end_alt = train_start_alt + train_period - timedelta(days=1)
+            test_start_alt = train_end_alt + timedelta(days=1)
+            test_end_alt = test_start_alt + test_period - timedelta(days=1)
+            
+            print(f"  Alternative calculation (train_start = data_min):")
+            print(f"    train_start: {train_start_alt.date()}")
+            print(f"    train_end: {train_end_alt.date()}")
+            print(f"    test_start: {test_start_alt.date()}")
+            print(f"    test_end: {test_end_alt.date()}")
+            print(f"    test_end <= data_max: {test_end_alt <= data_max}")
+            
+            # If test_end exceeds data_max, adjust it and recalculate backward
+            if test_end_alt > data_max:
+                print(f"  ⚠️  test_end ({test_end_alt.date()}) > data_max ({data_max.date()}), adjusting...")
+                test_end_alt = data_max
+                test_start_alt = test_end_alt - test_period + timedelta(days=1)
+                train_end_alt = test_start_alt - timedelta(days=1)
+                train_start_alt = train_end_alt - train_period + timedelta(days=1)
+                
+                print(f"  After test_end adjustment:")
+                print(f"    train_start: {train_start_alt.date()}")
+                print(f"    train_end: {train_end_alt.date()}")
+                print(f"    test_start: {test_start_alt.date()}")
+                print(f"    test_end: {test_end_alt.date()}")
+                print(f"    train_start >= data_min: {train_start_alt >= data_min}")
+                
+                # If train_start is still before data_min, we need to use all available data
+                if train_start_alt < data_min:
+                    print(f"  ⚠️  Still not enough data. Using all available data with adjusted periods:")
+                    train_start_alt = data_min
+                    # Calculate forward from train_start, but cap test_end at data_max
+                    train_end_alt = train_start_alt + train_period - timedelta(days=1)
+                    test_start_alt = train_end_alt + timedelta(days=1)
+                    test_end_alt = min(test_start_alt + test_period - timedelta(days=1), data_max)
+                    
+                    print(f"    train_start: {train_start_alt.date()} (using all available data)")
+                    print(f"    train_end: {train_end_alt.date()}")
+                    print(f"    test_start: {test_start_alt.date()}")
+                    print(f"    test_end: {test_end_alt.date()} (capped at data_max)")
+                    print(f"    Note: Periods may be slightly shorter than requested due to data limitations")
+            
+            if train_start_alt >= data_min:
+                print(f"  ✓ Alternative calculation works! Using adjusted dates.")
+                train_start = train_start_alt
+                train_end = train_end_alt
+                test_start = test_start_alt
+                test_end = test_end_alt
+            else:
+                return {"Error": f"Not enough data for walk-forward after adjusting for available data. Training period requires data from {train_start_alt.date()}, but earliest data is {data_min.date()}."}
+        else:
+            print(f"  ✓ After adjustment: train_start ({train_start.date()}) >= data_min ({data_min.date()})")
     
     if progress_callback:
         progress_callback(10)
@@ -537,6 +725,8 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     print(f"\n[BATCH WALK-FORWARD TIME DEBUG]")
     print(f"  Input end_date: {end_date_dt.date()}")
     print(f"  Data date range: {data['Date'].min().date()} to {data['Date'].max().date()}")
+    if test_end != end_date_dt:
+        print(f"  ⚠️  Adjusted test_end from {end_date_dt.date()} to {test_end.date()} (using latest available data)")
     print(f"  Training period input: {backtest_period_years} years, {backtest_period_months} months")
     print(f"  Walk-forward period input: {walk_forward_period_years} years, {walk_forward_period_months} months")
     print(f"  Calculated Training Period: {train_start.date()} to {train_end.date()}")

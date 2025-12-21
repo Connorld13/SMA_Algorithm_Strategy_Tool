@@ -2903,105 +2903,113 @@ def view_batch_results():
             combo_scores = []
             
             for combo_idx, combo in enumerate(all_combinations):
-                if is_walk_forward:
-                    is_best = (combo_idx == best_idx)
-                    
-                    # For walk-forward, each combination has its own training metrics
-                    # Use the combination's own metrics for training score
-                    combo_training_return = combo.get("taxed_return", 0)
-                    combo_training_winrate = combo.get("win_rate", 0)
-                    combo_training_trades = combo.get("trade_count", 0)
-                    
-                    
-                    training_combo_result = {
-                        "outputresults1": {
-                            "besttaxedreturn": combo_training_return,
-                            "betteroff": combo.get("better_off", 0),
-                            "besttradecount": combo_training_trades,
-                            "noalgoreturn": noalgoreturn
-                        },
-                        "outputresults2": {
-                            "winningtradepct": combo_training_winrate,
-                            "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
-                            "average_hold_time": combo.get("avg_hold_time", 0)
-                        },
-                        "param_stability": param_stability
-                    }
-                    training_score = scoring.calculate_backtest_score(training_combo_result, scoring_config)
-                    
-                    # Walk-forward score: Only the best combination (tested one) has walk-forward data
-                    # For the best combination, use result-level walk_forward_metrics to match Overview tab
-                    # This ensures consistency: Overview shows scores for best combo, All Combinations should match
-                    if is_best:
-                        # Use result-level walk_forward_metrics (which are for the best combination)
-                        wf_combo_result = {
-                            "outputresults1": {
-                                "besttaxedreturn": walk_forward_metrics.get("taxed_return", 0),
-                                "betteroff": 0.0,  # Walk-forward doesn't track better_off
-                                "besttradecount": walk_forward_metrics.get("trade_count", 0),
-                                "noalgoreturn": 0.0
-                            },
-                            "outputresults2": {
-                                "winningtradepct": walk_forward_metrics.get("win_rate", 0),
-                                "maxdrawdown(worst trade return pct)": walk_forward_metrics.get("max_drawdown", 0),
-                                "average_hold_time": walk_forward_metrics.get("avg_hold_time", 0)
-                            },
-                            "param_stability": {}  # Walk-forward doesn't have param stability
-                        }
-                        walk_forward_score = scoring.calculate_backtest_score(wf_combo_result, scoring_config)
+                try:
+                    if is_walk_forward:
+                        is_best = (combo_idx == best_idx)
                         
-                        # For best combination, also use result-level training_metrics to ensure training_score matches Overview
-                        # This ensures the training score for the best combo matches what's shown in Overview
-                        result_training_return = training_metrics.get("taxed_return", 0)
-                        result_training_winrate = training_metrics.get("win_rate", 0)
-                        result_training_trades = training_metrics.get("trade_count", 0)
+                        # For walk-forward, each combination has its own training metrics
+                        # Use the combination's own metrics for training score
+                        combo_training_return = combo.get("taxed_return", 0)
+                        combo_training_winrate = combo.get("win_rate", 0)
+                        combo_training_trades = combo.get("trade_count", 0)
                         
-                        best_training_combo_result = {
+                        
+                        training_combo_result = {
                             "outputresults1": {
-                                "besttaxedreturn": result_training_return,
-                                "betteroff": training_metrics.get("better_off", 0),
-                                "besttradecount": result_training_trades,
+                                "besttaxedreturn": combo_training_return,
+                                "betteroff": combo.get("better_off", 0),
+                                "besttradecount": combo_training_trades,
                                 "noalgoreturn": noalgoreturn
                             },
                             "outputresults2": {
-                                "winningtradepct": result_training_winrate,
-                                "maxdrawdown(worst trade return pct)": training_metrics.get("max_drawdown", 0),
-                                "average_hold_time": training_metrics.get("avg_hold_time", 0)
+                                "winningtradepct": combo_training_winrate,
+                                "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
+                                "average_hold_time": combo.get("avg_hold_time", 0)
                             },
                             "param_stability": param_stability
                         }
-                        training_score = scoring.calculate_backtest_score(best_training_combo_result, scoring_config)
+                        training_score = scoring.calculate_backtest_score(training_combo_result, scoring_config)
+                        
+                        # Walk-forward score: Only the best combination (tested one) has walk-forward data
+                        # For the best combination, use result-level walk_forward_metrics to match Overview tab
+                        # This ensures consistency: Overview shows scores for best combo, All Combinations should match
+                        if is_best:
+                            # Use result-level walk_forward_metrics (which are for the best combination)
+                            wf_combo_result = {
+                                "outputresults1": {
+                                    "besttaxedreturn": walk_forward_metrics.get("taxed_return", 0),
+                                    "betteroff": 0.0,  # Walk-forward doesn't track better_off
+                                    "besttradecount": walk_forward_metrics.get("trade_count", 0),
+                                    "noalgoreturn": 0.0
+                                },
+                                "outputresults2": {
+                                    "winningtradepct": walk_forward_metrics.get("win_rate", 0),
+                                    "maxdrawdown(worst trade return pct)": walk_forward_metrics.get("max_drawdown", 0),
+                                    "average_hold_time": walk_forward_metrics.get("avg_hold_time", 0)
+                                },
+                                "param_stability": {}  # Walk-forward doesn't have param stability
+                            }
+                            walk_forward_score = scoring.calculate_backtest_score(wf_combo_result, scoring_config)
+                            
+                            # For best combination, also use result-level training_metrics to ensure training_score matches Overview
+                            # This ensures the training score for the best combo matches what's shown in Overview
+                            result_training_return = training_metrics.get("taxed_return", 0)
+                            result_training_winrate = training_metrics.get("win_rate", 0)
+                            result_training_trades = training_metrics.get("trade_count", 0)
+                            
+                            best_training_combo_result = {
+                                "outputresults1": {
+                                    "besttaxedreturn": result_training_return,
+                                    "betteroff": training_metrics.get("better_off", 0),
+                                    "besttradecount": result_training_trades,
+                                    "noalgoreturn": noalgoreturn
+                                },
+                                "outputresults2": {
+                                    "winningtradepct": result_training_winrate,
+                                    "maxdrawdown(worst trade return pct)": training_metrics.get("max_drawdown", 0),
+                                    "average_hold_time": training_metrics.get("avg_hold_time", 0)
+                                },
+                                "param_stability": param_stability
+                            }
+                            training_score = scoring.calculate_backtest_score(best_training_combo_result, scoring_config)
+                        else:
+                            # Other combinations weren't tested in walk-forward, so no walk-forward score
+                            walk_forward_score = None
+                        
+                        # Calculate combined score using configurable weights
+                        # If no walk-forward score, use only training score (or set combined to training score)
+                        if walk_forward_score is not None:
+                            combined_score = training_score * training_weight + walk_forward_score * wf_weight
+                        else:
+                            # For combinations without walk-forward data, combined score = training score only
+                            combined_score = training_score
+                        
+                        combo_scores.append((combo, training_score, walk_forward_score, combined_score))
                     else:
-                        # Other combinations weren't tested in walk-forward, so no walk-forward score
-                        walk_forward_score = None
-                    
-                    # Calculate combined score using configurable weights
-                    # If no walk-forward score, use only training score (or set combined to training score)
-                    if walk_forward_score is not None:
-                        combined_score = training_score * training_weight + walk_forward_score * wf_weight
-                    else:
-                        # For combinations without walk-forward data, combined score = training score only
-                        combined_score = training_score
-                    
-                    combo_scores.append((combo, training_score, walk_forward_score, combined_score))
-                else:
-                    # Regular backtest - just calculate single score
-                    combo_result = {
-                        "outputresults1": {
-                            "besttaxedreturn": combo.get("taxed_return", 0),
-                            "betteroff": combo.get("better_off", 0),
-                            "besttradecount": combo.get("trade_count", 0),
-                            "noalgoreturn": noalgoreturn
-                        },
-                        "outputresults2": {
-                            "winningtradepct": combo.get("win_rate", 0),
-                            "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
-                            "average_hold_time": combo.get("avg_hold_time", 0)
-                        },
-                        "param_stability": param_stability
-                    }
-                    backtest_score = scoring.calculate_backtest_score(combo_result, scoring_config)
-                    combo_scores.append((combo, backtest_score))
+                        # Regular backtest - just calculate single score
+                        combo_result = {
+                            "outputresults1": {
+                                "besttaxedreturn": combo.get("taxed_return", 0),
+                                "betteroff": combo.get("better_off", 0),
+                                "besttradecount": combo.get("trade_count", 0),
+                                "noalgoreturn": noalgoreturn
+                            },
+                            "outputresults2": {
+                                "winningtradepct": combo.get("win_rate", 0),
+                                "maxdrawdown(worst trade return pct)": combo.get("max_drawdown", 0),
+                                "average_hold_time": combo.get("avg_hold_time", 0)
+                            },
+                            "param_stability": param_stability
+                        }
+                        backtest_score = scoring.calculate_backtest_score(combo_result, scoring_config)
+                        combo_scores.append((combo, backtest_score))
+                except Exception as e:
+                    print(f"ERROR: Failed to process combination {combo_idx}: {e}")
+                    print(f"  Combo data: {combo}")
+                    import traceback
+                    traceback.print_exc()
+                    # Skip this combination but continue with others
+                    continue
             
             # Sort by combined score (walk-forward) or backtest score (regular)
             if is_walk_forward:
