@@ -698,8 +698,8 @@ def on_run_now():
                         
                         algorithm_results[ticker] = result
                         
-                        # Save regular algorithm results to batch directory if batch run
-                        if is_batch_run and result and "Error" not in result and end_date_str:
+                        # Save regular algorithm results to batch directory if batch run (only if NOT walk-forward)
+                        if is_batch_run and result and "Error" not in result and end_date_str and not (enable_walk_forward and walk_forward_config):
                             import cache_manager
                             try:
                                 cache_saved = cache_manager.save_backtest_cache(
@@ -720,12 +720,16 @@ def on_run_now():
                         
                         # Debug: Print walk-forward info if enabled
                         if enable_walk_forward and walk_forward_config:
-                            print(f"Walk-forward result for {ticker}:")
-                            print(f"  Walk-forward mode: {result.get('walk_forward_mode', False)}")
-                            print(f"  Segments: {result.get('segments', 0)}")
-                            print(f"  Training score: {result.get('training_score', 0)}")
-                            print(f"  Walk-forward score: {result.get('walk_forward_score', 0)}")
-                            print(f"  Combined score: {result.get('combined_score', 0)}")
+                            if "Error" in result:
+                                print(f"Walk-forward ERROR for {ticker}:")
+                                print(f"  {result.get('Error', 'Unknown error')}")
+                            else:
+                                print(f"Walk-forward result for {ticker}:")
+                                print(f"  Walk-forward mode: {result.get('walk_forward_mode', False)}")
+                                print(f"  Segments: {result.get('segments', 0)}")
+                                print(f"  Training score: {result.get('training_score', 0)}")
+                                print(f"  Walk-forward score: {result.get('walk_forward_score', 0)}")
+                                print(f"  Combined score: {result.get('combined_score', 0)}")
                         
                         progress_callback(100)
                     except Exception as e:
@@ -2795,14 +2799,7 @@ def view_batch_results():
             # Combined score display
             ttk.Label(metrics_grid, text="COMBINED SCORE", font=("Arial", 11, "bold")).grid(row=7, column=0, columnspan=3, pady=(20, 10), sticky="w")
             combined_score_text = f"Combined Score: {combined_score:.2f}/10.0 ({training_weight*100:.0f}% Training + {wf_weight*100:.0f}% WF)"
-            combined_score_label = ttk.Label(metrics_grid, text=combined_score_text,
-                                            cursor="hand2", foreground="blue", font=("Arial", 10, "bold", "underline"))
-            combined_score_label.grid(row=8, column=0, columnspan=3, padx=10, pady=5, sticky="w")
-            combined_score_label.bind("<Button-1>", lambda e: show_combined_score_breakdown(
-                detail_window, combined_score, training_score, walk_forward_score,
-                training_weight, wf_weight, training_metrics, wf_metrics,
-                noalgoreturn, param_stability, scoring_config, stock_data['symbol']
-            ))
+            ttk.Label(metrics_grid, text=combined_score_text, font=("Arial", 10, "bold")).grid(row=8, column=0, columnspan=3, padx=10, pady=5, sticky="w")
             
             # Best SMA combination (matching All Combinations and Ranked Results)
             all_combinations = result.get("all_combinations", [])
@@ -2870,7 +2867,7 @@ def view_batch_results():
         
         # Configure columns
         if is_walk_forward:
-            combos_tree.heading("Combined_Score", text="Combined Score (click)")
+            combos_tree.heading("Combined_Score", text="Combined Score")
             combos_tree.heading("Train_Score", text="Train Score (click)")
             combos_tree.heading("WF_Score", text="WF Score (click)")
         else:
@@ -3120,8 +3117,8 @@ def view_batch_results():
                     column_name = combos_tree.heading(column)["text"]
                     item = combos_tree.identify_row(event.y)
                     
-                    # Check if it's a score column
-                    if item and column_name in ["Combined Score", "Train Score", "WF Score", "Score"]:
+                    # Check if it's a score column (Combined Score breakdown removed)
+                    if item and column_name in ["Train Score", "WF Score", "Score"]:
                         values = combos_tree.item(item, "values")
                         
                         # Find the combo by SMA values
@@ -3142,14 +3139,8 @@ def view_batch_results():
                             if str(combo.get('sma_a', '')) == sma_a and str(combo.get('sma_b', '')) == sma_b:
                                 combo_idx = all_combinations.index(combo) if combo in all_combinations else -1
                                 
-                                if column_name == "Combined Score" and is_walk_forward:
-                                    if combo_idx == best_idx:
-                                        show_combined_score_breakdown(
-                                            detail_window, combined_score, training_score, wf_score,
-                                            training_weight, wf_weight, training_metrics, walk_forward_metrics,
-                                            noalgoreturn, param_stability, scoring_config, stock_data['symbol']
-                                        )
-                                elif column_name == "Train Score" and is_walk_forward:
+                                # Combined Score breakdown removed - no longer clickable
+                                if column_name == "Train Score" and is_walk_forward:
                                     if combo_idx == best_idx:
                                         combo_data = {**training_metrics, "noalgoreturn": noalgoreturn, "param_stability": param_stability}
                                     else:
