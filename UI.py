@@ -77,6 +77,13 @@ cancel_requested = False
 # Persistent set to track selected stocks across filter operations
 persistent_selected_stocks = set()
 
+# Global SMA range variables (initialized in create_ui)
+sma_a_start_var = None
+sma_a_end_var = None
+sma_b_start_var = None
+sma_b_end_var = None
+sma_inc_var = None
+
 def check_library_updates():
     """Check for yfinance updates before startup using PyPI API."""
     print("Checking for yfinance updates...", end="", flush=True)
@@ -460,6 +467,27 @@ def on_run_now():
                 wf_total_months = walk_forward_years * 12 + walk_forward_months
                 total_total_months = total_years * 12 + total_months
                 
+                # Get max SMA range from UI inputs for validation (dynamic minimum)
+                max_sma_range = max(
+                    sma_a_end_var.get() if sma_a_end_var else 200,
+                    sma_b_end_var.get() if sma_b_end_var else 200
+                )
+                # Minimum walk-forward period based on max SMA range
+                # Approximate: 200 trading days ≈ 10 months, so use max_sma_range / 20 as minimum months
+                MIN_WALK_FORWARD_MONTHS = max(10, int(max_sma_range / 20))
+                
+                # Validate minimum walk-forward period
+                if wf_total_months < MIN_WALK_FORWARD_MONTHS:
+                    messagebox.showerror(
+                        "Walk-Forward Period Too Short",
+                        f"Walk-forward period ({walk_forward_years}Y {walk_forward_months}M) is too short.\n\n"
+                        f"Minimum required: {MIN_WALK_FORWARD_MONTHS} months (based on max SMA range of {max_sma_range}).\n\n"
+                        f"Please increase the walk-forward period or reduce the training period."
+                    )
+                    update_progress(0)
+                    set_status("Ready")
+                    return
+                
                 if training_total_months + wf_total_months != total_total_months:
                     messagebox.showerror(
                         "Timeframe Mismatch",
@@ -600,6 +628,13 @@ def on_run_now():
                             if is_batch_run:
                                 # Run batch walk forward - it will handle training period internally
                                 # Don't pass training_result from full timeframe - let it recalculate on training period only
+                                # Get SMA range values (with defaults if not initialized)
+                                sma_a_start_val = sma_a_start_var.get() if sma_a_start_var else 5
+                                sma_a_end_val = sma_a_end_var.get() if sma_a_end_var else 200
+                                sma_b_start_val = sma_b_start_var.get() if sma_b_start_var else 5
+                                sma_b_end_val = sma_b_end_var.get() if sma_b_end_var else 200
+                                sma_inc_val = sma_inc_var.get() if sma_inc_var else 5
+                                
                                 result = walk_forward.run_batch_walk_forward_analysis(
                                     ticker_data,
                                     start_amount=10000,
@@ -612,10 +647,22 @@ def on_run_now():
                                     walk_forward_period_years=walk_forward_config['walk_forward_period_years'],
                                     walk_forward_period_months=walk_forward_config['walk_forward_period_months'],
                                     scoring_config=scoring_config,
-                                    training_result=None  # Let it recalculate on training period only
+                                    training_result=None,  # Let it recalculate on training period only
+                                    sma_a_start=sma_a_start_val,
+                                    sma_a_end=sma_a_end_val,
+                                    sma_b_start=sma_b_start_val,
+                                    sma_b_end=sma_b_end_val,
+                                    sma_inc=sma_inc_val
                                 )
                             else:
                                 # Single stock: use regular walk forward
+                                # Get SMA range values (with defaults if not initialized)
+                                sma_a_start_val = sma_a_start_var.get() if sma_a_start_var else 5
+                                sma_a_end_val = sma_a_end_var.get() if sma_a_end_var else 200
+                                sma_b_start_val = sma_b_start_var.get() if sma_b_start_var else 5
+                                sma_b_end_val = sma_b_end_var.get() if sma_b_end_var else 200
+                                sma_inc_val = sma_inc_var.get() if sma_inc_var else 5
+                                
                                 result = walk_forward.run_walk_forward_analysis(
                                     ticker_data,
                                     start_amount=10000,
@@ -630,7 +677,12 @@ def on_run_now():
                                     rebalance_years=walk_forward_config['rebalance_years'],
                                     rebalance_months=walk_forward_config['rebalance_months'],
                                     rebalance_none=walk_forward_config['rebalance_none'],
-                                    scoring_config=scoring_config
+                                    scoring_config=scoring_config,
+                                    sma_a_start=sma_a_start_val,
+                                    sma_a_end=sma_a_end_val,
+                                    sma_b_start=sma_b_start_val,
+                                    sma_b_end=sma_b_end_val,
+                                    sma_inc=sma_inc_val
                                 )
                             # Save walk-forward results to cache
                             if result and "Error" not in result and end_date_str:
@@ -685,6 +737,13 @@ def on_run_now():
                                     traceback.print_exc()
                         else:
                             # Run regular algorithm
+                            # Get SMA range values (with defaults if not initialized)
+                            sma_a_start_val = sma_a_start_var.get() if sma_a_start_var else 5
+                            sma_a_end_val = sma_a_end_var.get() if sma_a_end_var else 200
+                            sma_b_start_val = sma_b_start_var.get() if sma_b_start_var else 5
+                            sma_b_end_val = sma_b_end_var.get() if sma_b_end_var else 200
+                            sma_inc_val = sma_inc_var.get() if sma_inc_var else 5
+                            
                             result = algorithm.run_algorithm(
                                 ticker_data,
                                 start_amount=10000,
@@ -693,7 +752,12 @@ def on_run_now():
                                 optimization_objective=optimization_objective,
                                 start_date=start_date_str,
                                 end_date=end_date_str,
-                                use_cache=True
+                                use_cache=True,
+                                sma_a_start=sma_a_start_val,
+                                sma_a_end=sma_a_end_val,
+                                sma_b_start=sma_b_start_val,
+                                sma_b_end=sma_b_end_val,
+                                sma_inc=sma_inc_val
                             )
                         
                         algorithm_results[ticker] = result
@@ -5587,6 +5651,42 @@ def create_ui():
     # Set initial value
     optimization_objective_var.set("Taxed Return")
 
+    # SMA Range Settings Frame
+    global sma_a_start_var, sma_a_end_var, sma_b_start_var, sma_b_end_var, sma_inc_var
+    
+    sma_range_frame = ttk.LabelFrame(settings_frame, text="SMA Range Settings", padding="5")
+    sma_range_frame.pack(fill="x", pady=5)
+    
+    # SMA A Range
+    sma_a_frame = ttk.Frame(sma_range_frame)
+    sma_a_frame.pack(fill="x", pady=2)
+    ttk.Label(sma_a_frame, text="SMA A:", width=10, anchor="w").pack(side="left", padx=2)
+    sma_a_start_var = tk.IntVar(value=5)
+    sma_a_end_var = tk.IntVar(value=200)
+    ttk.Label(sma_a_frame, text="Start:").pack(side="left", padx=2)
+    ttk.Spinbox(sma_a_frame, from_=1, to=500, textvariable=sma_a_start_var, width=6).pack(side="left", padx=2)
+    ttk.Label(sma_a_frame, text="End:").pack(side="left", padx=5)
+    ttk.Spinbox(sma_a_frame, from_=1, to=500, textvariable=sma_a_end_var, width=6).pack(side="left", padx=2)
+    
+    # SMA B Range
+    sma_b_frame = ttk.Frame(sma_range_frame)
+    sma_b_frame.pack(fill="x", pady=2)
+    ttk.Label(sma_b_frame, text="SMA B:", width=10, anchor="w").pack(side="left", padx=2)
+    sma_b_start_var = tk.IntVar(value=5)
+    sma_b_end_var = tk.IntVar(value=200)
+    ttk.Label(sma_b_frame, text="Start:").pack(side="left", padx=2)
+    ttk.Spinbox(sma_b_frame, from_=1, to=500, textvariable=sma_b_start_var, width=6).pack(side="left", padx=2)
+    ttk.Label(sma_b_frame, text="End:").pack(side="left", padx=5)
+    ttk.Spinbox(sma_b_frame, from_=1, to=500, textvariable=sma_b_end_var, width=6).pack(side="left", padx=2)
+    
+    # SMA Increment
+    sma_inc_frame = ttk.Frame(sma_range_frame)
+    sma_inc_frame.pack(fill="x", pady=2)
+    ttk.Label(sma_inc_frame, text="Increment:", width=10, anchor="w").pack(side="left", padx=2)
+    sma_inc_var = tk.IntVar(value=5)
+    ttk.Spinbox(sma_inc_frame, from_=1, to=50, textvariable=sma_inc_var, width=6).pack(side="left", padx=2)
+    ttk.Label(sma_inc_frame, text="(step size for SMA values)", font=("Arial", 8), foreground="gray").pack(side="left", padx=5)
+    
     # Options Frame
     options_frame = ttk.Frame(settings_frame)
     options_frame.pack(fill="x", pady=5)
@@ -5637,17 +5737,26 @@ def create_ui():
             wf_years = walk_forward_years_var.get()
             wf_months = walk_forward_months_var.get()
             
+            # Get max SMA range from UI inputs
+            max_sma_range = max(
+                sma_a_end_var.get() if sma_a_end_var else 200,
+                sma_b_end_var.get() if sma_b_end_var else 200
+            )
+            # Minimum walk-forward period is 10 months (based on max SMA range)
+            # Approximate: 200 trading days ≈ 10 months, so use max_sma_range / 20 as minimum months
+            MIN_WALK_FORWARD_MONTHS = max(10, int(max_sma_range / 20))
+            
             total_total_months = total_years * 12 + total_months
             training_total_months = training_years * 12 + training_months
             wf_total_months = wf_years * 12 + wf_months
             
             # Calculate max allowed values
-            max_training_months = total_total_months - 1  # At least 1 month for walk-forward
+            max_training_months = total_total_months - MIN_WALK_FORWARD_MONTHS  # At least 10 months for walk-forward
             max_wf_months = total_total_months - 1  # At least 1 month for training
             
-            # Limit training period to not exceed total
+            # Limit training period to not exceed total (ensuring 10 months for walk-forward)
             if training_total_months > max_training_months:
-                # Cap at maximum
+                # Cap at maximum to ensure minimum walk-forward period
                 new_training_years = max_training_months // 12
                 new_training_months = max_training_months % 12
                 backtest_years_var.set(new_training_years)
@@ -5656,11 +5765,14 @@ def create_ui():
             
             # Auto-adjust walk-forward period to match total - training
             remaining_months = total_total_months - training_total_months
-            if remaining_months <= 0:
-                # If training takes up all time, set walk-forward to minimum (1 month)
-                remaining_months = 1
+            if remaining_months < MIN_WALK_FORWARD_MONTHS:
+                # If remaining is less than minimum, set walk-forward to minimum (10 months)
+                remaining_months = MIN_WALK_FORWARD_MONTHS
                 # Reduce training to make room
-                new_training_total = total_total_months - 1
+                new_training_total = total_total_months - MIN_WALK_FORWARD_MONTHS
+                if new_training_total < 1:
+                    new_training_total = 1  # At least 1 month for training
+                    remaining_months = total_total_months - 1
                 backtest_years_var.set(new_training_total // 12)
                 backtest_months_var.set(new_training_total % 12)
                 training_total_months = new_training_total
@@ -5718,6 +5830,10 @@ def create_ui():
     timeframe_years_var.trace_add("write", validate_walk_forward_timeframe)
     timeframe_months_var.trace_add("write", validate_walk_forward_timeframe)
     enable_walk_forward_var.trace_add("write", validate_walk_forward_timeframe)
+    
+    # Validate when SMA range changes (affects minimum walk-forward period)
+    sma_a_end_var.trace_add("write", validate_walk_forward_timeframe)
+    sma_b_end_var.trace_add("write", validate_walk_forward_timeframe)
     
     # Initial validation to set correct values
     validate_walk_forward_timeframe()

@@ -7,7 +7,7 @@ import time
 import cache_manager
 
 def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=True, optimization_objective="taxed_return", 
-                  start_date=None, end_date=None, use_cache=True):
+                  start_date=None, end_date=None, use_cache=True, sma_a_start=5, sma_a_end=200, sma_b_start=5, sma_b_end=200, sma_inc=5):
     """
     Runs the SMA trading algorithm on the provided stock data.
 
@@ -71,8 +71,13 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
     average_hold_time = 0
     win_percentage_last_4_trades = None
 
-    # Parameters for SMA ranges
-    astart, aend, bstart, bend, inc = 5, 200, 5, 200, 5
+    # Parameters for SMA ranges (can be overridden by function parameters)
+    astart, aend, bstart, bend, inc = sma_a_start, sma_a_end, sma_b_start, sma_b_end, sma_inc
+    
+    # Validate ranges
+    if astart < 1 or aend < astart or bstart < 1 or bend < bstart or inc < 1:
+        return {"Error": f"Invalid SMA range parameters: SMA_A ({astart}-{aend}), SMA_B ({bstart}-{bend}), Increment ({inc})"}
+    
     combinations = (((aend - astart) // inc) + 1) * (((bend - bstart) // inc) + 1)
     iterations = 0
 

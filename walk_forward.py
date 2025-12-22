@@ -12,7 +12,7 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
                               backtest_period_years=4, backtest_period_months=0,
                               walk_forward_period_years=1, walk_forward_period_months=0,
                               rebalance_years=0, rebalance_months=3, rebalance_none=False,
-                              scoring_config=None):
+                              scoring_config=None, sma_a_start=5, sma_a_end=200, sma_b_start=5, sma_b_end=200, sma_inc=5):
     """
     Run walk-forward analysis on stock data.
     
@@ -67,11 +67,16 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     data_min = data['Date'].min()
     data_max = data['Date'].max()
     
+    # Get max SMA range from parameters (default is 200)
+    # This defines the minimum test period length required
+    MAX_SMA_RANGE = max(sma_a_end, sma_b_end)
+    
     print(f"\n[WALK-FORWARD INITIAL CALCULATION DEBUG]")
     print(f"  Input end_date: {end_date_dt.date()}")
     print(f"  Data date range: {data_min.date()} to {data_max.date()}")
     print(f"  Training period input: {backtest_period_years} years, {backtest_period_months} months")
     print(f"  Walk-forward period input: {walk_forward_period_years} years, {walk_forward_period_months} months")
+    print(f"  Minimum test period required: {MAX_SMA_RANGE} rows (based on max SMA range)")
     print(f"  Initial test_end: {test_end.date()}")
     print(f"  Initial test_start: {test_start.date()}")
     print(f"  Initial train_end: {train_end.date()}")
@@ -186,7 +191,18 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     print(f"  Calculated Training Period: {train_start.date()} to {train_end.date()}")
     print(f"  Calculated Test Period: {test_start.date()} to {test_end.date()}")
     print(f"  Training data rows: {len(data[(data['Date'] >= train_start) & (data['Date'] <= train_end)])}")
-    print(f"  Test data rows: {len(data[(data['Date'] >= test_start) & (data['Date'] <= test_end)])}")
+    test_data_rows = len(data[(data['Date'] >= test_start) & (data['Date'] <= test_end)])
+    print(f"  Test data rows: {test_data_rows}")
+    print(f"  Minimum required test rows: {MAX_SMA_RANGE} (based on max SMA range)")
+    
+    # Validate test period has enough rows for max SMA range
+    if test_data_rows < MAX_SMA_RANGE:
+        error_msg = f"Test period has insufficient data: {test_data_rows} rows available, but need at least {MAX_SMA_RANGE} rows (based on max SMA range of {MAX_SMA_RANGE}). Test period: {test_start.date()} to {test_end.date()}. Please increase the walk-forward period length."
+        print(f"  ❌ {error_msg}")
+        raise ValueError(error_msg)
+    else:
+        print(f"  ✓ Test period has sufficient data ({test_data_rows} >= {MAX_SMA_RANGE})")
+    
     print(f"  Overlap check: train_end ({train_end.date()}) < test_start ({test_start.date()}): {train_end < test_start}")
     print(f"  Total period: {(test_end - train_start).days / 365.25:.2f} years")
     
@@ -196,7 +212,7 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     if len(train_data) == 0:
         raise ValueError("No training data available")
     
-    # Run optimization on training period
+    # Run optimization on training period (no constraint needed since test period is validated)
     if progress_callback:
         progress_callback(20)
     
@@ -208,7 +224,12 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
         optimization_objective=optimization_objective,
         start_date=train_start.strftime("%Y-%m-%d"),
         end_date=train_end.strftime("%Y-%m-%d"),
-        use_cache=True
+        use_cache=True,
+        sma_a_start=sma_a_start,
+        sma_a_end=sma_a_end,
+        sma_b_start=sma_b_start,
+        sma_b_end=sma_b_end,
+        sma_inc=sma_inc
     )
     
     if "Error" in train_result:
@@ -276,6 +297,8 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
         progress_callback(65)
     
     # Test the best pair on test period
+    test_data_rows = len(test_data)
+    print(f"[DEBUG] Running test period backtest with SMA_A={best_a}, SMA_B={best_b}, test_data_rows={test_data_rows}")
     test_result = run_fixed_parameters_backtest(
         test_data,
         sma_a=best_a,
@@ -287,7 +310,9 @@ def run_walk_forward_analysis(data, start_amount=10000, progress_callback=None, 
     )
     
     if test_result is None:
-        return {"Error": "Failed to run test period backtest"}
+        error_msg = f"Failed to run test period backtest. Test period: {test_start.date()} to {test_end.date()}, SMA_A={best_a}, SMA_B={best_b}, test_data_rows={test_data_rows}"
+        print(f"[ERROR] {error_msg}")
+        return {"Error": error_msg}
     
     if progress_callback:
         progress_callback(85)
@@ -416,13 +441,6 @@ def run_fixed_parameters_backtest(data, sma_a, sma_b, start_amount=10000, compou
     Used for testing optimized parameters on walk-forward periods.
     """
     try:
-        # This is a simplified version - we'll reuse algorithm logic
-        # For now, call the main algorithm but with a very narrow parameter range
-        # that forces it to use the specified values
-        
-        # Actually, we need to implement a simpler version that just runs the strategy
-        # with fixed parameters. Let me create a minimal implementation.
-        
         stockcol = 'Close'
         if not pd.api.types.is_datetime64_any_dtype(data['Date']):
             data['Date'] = pd.to_datetime(data['Date'])
@@ -430,7 +448,10 @@ def run_fixed_parameters_backtest(data, sma_a, sma_b, start_amount=10000, compou
         data[stockcol] = data[stockcol].round(3)
         
         numrows = len(data)
-        if numrows < max(sma_a, sma_b):
+        max_sma = max(sma_a, sma_b)
+        if numrows < max_sma:
+            error_msg = f"Insufficient test data: {numrows} rows available, but need at least {max_sma} rows for SMA_A={sma_a}, SMA_B={sma_b}"
+            print(f"[ERROR] run_fixed_parameters_backtest: {error_msg}")
             return None
         
         # Calculate SMAs
@@ -560,8 +581,10 @@ def run_fixed_parameters_backtest(data, sma_a, sma_b, start_amount=10000, compou
         }
         
     except Exception as e:
-        print(f"Error in fixed parameters backtest: {e}")
+        error_msg = f"Exception in run_fixed_parameters_backtest: {type(e).__name__}: {str(e)}"
+        print(f"[ERROR] {error_msg}")
         import traceback
+        print("[ERROR] Traceback:")
         traceback.print_exc()
         return None
 
@@ -572,7 +595,7 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
                                    optimization_objective="taxed_return", end_date=None,
                                    backtest_period_years=4, backtest_period_months=0,
                                    walk_forward_period_years=1, walk_forward_period_months=0,
-                                   scoring_config=None, training_result=None):
+                                   scoring_config=None, training_result=None, sma_a_start=5, sma_a_end=200, sma_b_start=5, sma_b_end=200, sma_inc=5):
     """
     Run simple walk-forward analysis for batch mode: Train on first X years, test on remaining years.
     This is optimized for batch runs where we first run regular algorithm to find best combo.
@@ -721,6 +744,10 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     if progress_callback:
         progress_callback(10)
     
+    # Get max SMA range from parameters (default is 200)
+    # This defines the minimum test period length required
+    MAX_SMA_RANGE = max(sma_a_end, sma_b_end)
+    
     # Debug logging for time periods
     print(f"\n[BATCH WALK-FORWARD TIME DEBUG]")
     print(f"  Input end_date: {end_date_dt.date()}")
@@ -732,7 +759,18 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     print(f"  Calculated Training Period: {train_start.date()} to {train_end.date()}")
     print(f"  Calculated Test Period: {test_start.date()} to {test_end.date()}")
     print(f"  Training data rows: {len(data[(data['Date'] >= train_start) & (data['Date'] <= train_end)])}")
-    print(f"  Test data rows: {len(data[(data['Date'] >= test_start) & (data['Date'] <= test_end)])}")
+    test_data_rows = len(data[(data['Date'] >= test_start) & (data['Date'] <= test_end)])
+    print(f"  Test data rows: {test_data_rows}")
+    print(f"  Minimum required test rows: {MAX_SMA_RANGE} (based on max SMA range)")
+    
+    # Validate test period has enough rows for max SMA range
+    if test_data_rows < MAX_SMA_RANGE:
+        error_msg = f"Test period has insufficient data: {test_data_rows} rows available, but need at least {MAX_SMA_RANGE} rows (based on max SMA range of {MAX_SMA_RANGE}). Test period: {test_start.date()} to {test_end.date()}. Please increase the walk-forward period length."
+        print(f"  ❌ {error_msg}")
+        return {"Error": error_msg}
+    else:
+        print(f"  ✓ Test period has sufficient data ({test_data_rows} >= {MAX_SMA_RANGE})")
+    
     print(f"  Overlap check: train_end ({train_end.date()}) < test_start ({test_start.date()}): {train_end < test_start}")
     print(f"  Total period: {(test_end - train_start).days / 365.25:.2f} years")
     print(f"  Training result provided: {training_result is not None}")
@@ -750,7 +788,7 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     if progress_callback:
         progress_callback(20)
     
-    # Always run training on training period only
+    # Always run training on training period only (no constraint needed since test period is validated)
     training_result = algorithm.run_algorithm(
         train_data,
         start_amount=start_amount,
@@ -759,7 +797,12 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
         optimization_objective=optimization_objective,
         start_date=train_start.strftime("%Y-%m-%d"),
         end_date=train_end.strftime("%Y-%m-%d"),
-        use_cache=True
+        use_cache=True,
+        sma_a_start=sma_a_start,
+        sma_a_end=sma_a_end,
+        sma_b_start=sma_b_start,
+        sma_b_end=sma_b_end,
+        sma_inc=sma_inc
     )
     
     print(f"  Training algorithm completed. Training result date range check:")
@@ -837,6 +880,8 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
         progress_callback(65)
     
     # Test the best pair on test period
+    test_data_rows = len(test_data)
+    print(f"[DEBUG] Running test period backtest with SMA_A={best_a}, SMA_B={best_b}, test_data_rows={test_data_rows}")
     test_result = run_fixed_parameters_backtest(
         test_data,
         sma_a=best_a,
@@ -848,7 +893,9 @@ def run_batch_walk_forward_analysis(data, start_amount=10000, progress_callback=
     )
     
     if test_result is None:
-        return {"Error": "Failed to run test period backtest"}
+        error_msg = f"Failed to run test period backtest. Test period: {test_start.date()} to {test_end.date()}, SMA_A={best_a}, SMA_B={best_b}, test_data_rows={test_data_rows}"
+        print(f"[ERROR] {error_msg}")
+        return {"Error": error_msg}
     
     if progress_callback:
         progress_callback(85)
