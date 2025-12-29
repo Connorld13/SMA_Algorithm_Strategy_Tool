@@ -1028,6 +1028,7 @@ def view_trade_table():
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
                                 'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                                'PreTaxCumReturn': f"{trade.get('PreTaxCumReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -1039,12 +1040,14 @@ def view_trade_table():
                         all_trades.append({
                             'Period': '────────────────────────────────────',
                             'Trade Date': '', 'BuyDate': '', 'SellDate': '',
-                            'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '',
+                            'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '', 'PreTaxCumReturn': '',
                             'HoldTime': '', 'GainDollars': '', 'SMA_A': '', 'SMA_B': ''
                         })
                     
                     # Add walk-forward test period trades
                     if walk_forward_trades:
+                        # Calculate cumulative return separately for walk-forward trades (starting from 0)
+                        wf_cum_return = 0.0
                         for trade in walk_forward_trades:
                             # Format dates
                             if isinstance(trade.get('Date'), datetime):
@@ -1062,6 +1065,13 @@ def view_trade_table():
                             else:
                                 sell_date = str(trade.get('SellDate', ''))
                             
+                            # Calculate cumulative return for this walk-forward trade
+                            pre_tax_return = trade.get('PreTaxReturn', 0)
+                            if isinstance(pre_tax_return, str):
+                                # If it's already formatted as percentage, convert back
+                                pre_tax_return = float(pre_tax_return.replace('%', '')) / 100
+                            wf_cum_return = (wf_cum_return + 1) * (pre_tax_return + 1) - 1
+                            
                             all_trades.append({
                                 'Period': 'WALK-FORWARD TEST',
                                 'Trade Date': trade_date,
@@ -1069,7 +1079,8 @@ def view_trade_table():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                                'PreTaxReturn': f"{pre_tax_return:.2%}",
+                                'PreTaxCumReturn': f"{wf_cum_return:.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -1147,6 +1158,7 @@ def view_trade_table():
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
                                 'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                                'PreTaxCumReturn': f"{trade.get('PreTaxCumReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -1208,8 +1220,18 @@ def view_trade_table():
             tree_trade.column(col, anchor="center", width=120)
 
         for trade in best_trades:
-            values = [str(trade.get(col, '')) for col in columns]
-            tree_trade.insert("", "end", values=values)
+            # Format PreTaxReturn and PreTaxCumReturn as percentages
+            formatted_values = []
+            for col in columns:
+                value = trade.get(col, '')
+                if col == 'PreTaxReturn' or col == 'PreTaxCumReturn':
+                    if isinstance(value, (int, float)):
+                        formatted_values.append(f"{value:.2%}")
+                    else:
+                        formatted_values.append(str(value))
+                else:
+                    formatted_values.append(str(value))
+            tree_trade.insert("", "end", values=formatted_values)
 
     def populate_trade_table(event=None):
         """Populate trade table from current results."""
@@ -1354,8 +1376,13 @@ def export_results_to_csv():
         else:
             total_timeframe = "Custom"
     
-    # Check if walk-forward mode was used
-    is_walk_forward = any(result.get("walk_forward_mode", False) for result in algorithm_results.values() if "Error" not in result)
+    # Check if all results are walk-forward (if so, exclude parameter stability columns)
+    # If any result is non-walk-forward, include parameter stability columns
+    all_walk_forward = all(
+        result.get("walk_forward_mode", False) 
+        for result in algorithm_results.values() 
+        if "Error" not in result
+    ) if algorithm_results else False
 
     for symbol, result in algorithm_results.items():
         if "Error" in result:
@@ -1407,40 +1434,47 @@ def export_results_to_csv():
             "Max Drawdown": maxdrawdown,
             "# of Closed Trades": besttradecount,
             "Avg Hold Time": avg_hold_time,
-            "Win % Last 4 Trades": win_pct_last_4,
-            # Parameter Stability Metrics - Taxed Return
-            "Taxed Return Avg": param_stability.get("taxed_return_avg", 0),
-            "Taxed Return Std": param_stability.get("taxed_return_std", 0),
-            "Taxed Return Max": param_stability.get("taxed_return_max", 0),
-            "Taxed Return Min": param_stability.get("taxed_return_min", 0),
-            "Taxed Return Max-Min": param_stability.get("taxed_return_max_min_diff", 0),
-            "Taxed Return Max-Avg": param_stability.get("taxed_return_max_avg_diff", 0),
-            # Parameter Stability Metrics - Better Off
-            "Better Off Avg": param_stability.get("better_off_avg", 0),
-            "Better Off Std": param_stability.get("better_off_std", 0),
-            "Better Off Max": param_stability.get("better_off_max", 0),
-            "Better Off Min": param_stability.get("better_off_min", 0),
-            "Better Off Max-Min": param_stability.get("better_off_max_min_diff", 0),
-            "Better Off Max-Avg": param_stability.get("better_off_max_avg_diff", 0),
-            # Parameter Stability Metrics - Win Rate
-            "Win Rate Avg": param_stability.get("win_rate_avg", 0),
-            "Win Rate Std": param_stability.get("win_rate_std", 0),
-            "Win Rate Max": param_stability.get("win_rate_max", 0),
-            "Win Rate Min": param_stability.get("win_rate_min", 0),
-            "Win Rate Max-Min": param_stability.get("win_rate_max_min_diff", 0),
-            "Win Rate Max-Avg": param_stability.get("win_rate_max_avg_diff", 0),
-            # Parameter Stability Metrics - Trade Count
-            "Trade Count Avg": param_stability.get("trade_count_avg", 0),
-            "Trade Count Std": param_stability.get("trade_count_std", 0),
-            "Trade Count Max": param_stability.get("trade_count_max", 0),
-            "Trade Count Min": param_stability.get("trade_count_min", 0),
-            "Trade Count Max-Min": param_stability.get("trade_count_max_min_diff", 0),
-            "Trade Count Max-Avg": param_stability.get("trade_count_max_avg_diff", 0)
+            "Win % Last 4 Trades": win_pct_last_4
         }
+        
+        # Only include parameter stability metrics for non-walk-forward results
+        # Walk-forward only uses the best combo, so no parameter stability data exists
+        if mode != "WalkForward":
+            export_row.update({
+                # Parameter Stability Metrics - Taxed Return
+                "Taxed Return Avg": param_stability.get("taxed_return_avg", 0),
+                "Taxed Return Std": param_stability.get("taxed_return_std", 0),
+                "Taxed Return Max": param_stability.get("taxed_return_max", 0),
+                "Taxed Return Min": param_stability.get("taxed_return_min", 0),
+                "Taxed Return Max-Min": param_stability.get("taxed_return_max_min_diff", 0),
+                "Taxed Return Max-Avg": param_stability.get("taxed_return_max_avg_diff", 0),
+                # Parameter Stability Metrics - Better Off
+                "Better Off Avg": param_stability.get("better_off_avg", 0),
+                "Better Off Std": param_stability.get("better_off_std", 0),
+                "Better Off Max": param_stability.get("better_off_max", 0),
+                "Better Off Min": param_stability.get("better_off_min", 0),
+                "Better Off Max-Min": param_stability.get("better_off_max_min_diff", 0),
+                "Better Off Max-Avg": param_stability.get("better_off_max_avg_diff", 0),
+                # Parameter Stability Metrics - Win Rate
+                "Win Rate Avg": param_stability.get("win_rate_avg", 0),
+                "Win Rate Std": param_stability.get("win_rate_std", 0),
+                "Win Rate Max": param_stability.get("win_rate_max", 0),
+                "Win Rate Min": param_stability.get("win_rate_min", 0),
+                "Win Rate Max-Min": param_stability.get("win_rate_max_min_diff", 0),
+                "Win Rate Max-Avg": param_stability.get("win_rate_max_avg_diff", 0),
+                # Parameter Stability Metrics - Trade Count
+                "Trade Count Avg": param_stability.get("trade_count_avg", 0),
+                "Trade Count Std": param_stability.get("trade_count_std", 0),
+                "Trade Count Max": param_stability.get("trade_count_max", 0),
+                "Trade Count Min": param_stability.get("trade_count_min", 0),
+                "Trade Count Max-Min": param_stability.get("trade_count_max_min_diff", 0),
+                "Trade Count Max-Avg": param_stability.get("trade_count_max_avg_diff", 0)
+            })
 
         export_data.append(export_row)
 
-    export_df = pd.DataFrame(export_data, columns=[
+    # Build columns list dynamically - include parameter stability only if not all results are walk-forward
+    base_columns = [
         "Symbol",
         "Test Date",
         "strategy",
@@ -1460,36 +1494,47 @@ def export_results_to_csv():
         "Max Drawdown",
         "# of Closed Trades",
         "Avg Hold Time",
-        "Win % Last 4 Trades",
-        # Parameter Stability Metrics - Taxed Return
-        "Taxed Return Avg",
-        "Taxed Return Std",
-        "Taxed Return Max",
-        "Taxed Return Min",
-        "Taxed Return Max-Min",
-        "Taxed Return Max-Avg",
-        # Parameter Stability Metrics - Better Off
-        "Better Off Avg",
-        "Better Off Std",
-        "Better Off Max",
-        "Better Off Min",
-        "Better Off Max-Min",
-        "Better Off Max-Avg",
-        # Parameter Stability Metrics - Win Rate
-        "Win Rate Avg",
-        "Win Rate Std",
-        "Win Rate Max",
-        "Win Rate Min",
-        "Win Rate Max-Min",
-        "Win Rate Max-Avg",
-        # Parameter Stability Metrics - Trade Count
-        "Trade Count Avg",
-        "Trade Count Std",
-        "Trade Count Max",
-        "Trade Count Min",
-        "Trade Count Max-Min",
-        "Trade Count Max-Avg"
-    ])
+        "Win % Last 4 Trades"
+    ]
+    
+    # Only include parameter stability columns if we have non-walk-forward results
+    # (If all results are walk-forward, exclude these columns)
+    if not all_walk_forward:
+        param_stability_columns = [
+            # Parameter Stability Metrics - Taxed Return
+            "Taxed Return Avg",
+            "Taxed Return Std",
+            "Taxed Return Max",
+            "Taxed Return Min",
+            "Taxed Return Max-Min",
+            "Taxed Return Max-Avg",
+            # Parameter Stability Metrics - Better Off
+            "Better Off Avg",
+            "Better Off Std",
+            "Better Off Max",
+            "Better Off Min",
+            "Better Off Max-Min",
+            "Better Off Max-Avg",
+            # Parameter Stability Metrics - Win Rate
+            "Win Rate Avg",
+            "Win Rate Std",
+            "Win Rate Max",
+            "Win Rate Min",
+            "Win Rate Max-Min",
+            "Win Rate Max-Avg",
+            # Parameter Stability Metrics - Trade Count
+            "Trade Count Avg",
+            "Trade Count Std",
+            "Trade Count Max",
+            "Trade Count Min",
+            "Trade Count Max-Min",
+            "Trade Count Max-Avg"
+        ]
+        all_columns = base_columns + param_stability_columns
+    else:
+        all_columns = base_columns
+    
+    export_df = pd.DataFrame(export_data, columns=all_columns)
 
     if export_df.empty:
         messagebox.showinfo("No Data", "There are no results to export.")
@@ -3450,22 +3495,24 @@ def view_batch_results():
             else:
                 ttk.Label(trades_tab, text="No trades available for this combination", font=("Arial", 12)).pack(pady=20)
         
-        # Parameter stability tab
-        stability_tab = ttk.Frame(detail_notebook)
-        detail_notebook.add(stability_tab, text="Parameter Stability")
-        
-        param_stability = result.get("param_stability", {})
-        if param_stability:
-            stability_text = tk.Text(stability_tab, wrap="word", padx=20, pady=20)
-            stability_text.pack(fill="both", expand=True)
-            stability_text.insert("1.0", "Parameter Stability Metrics:\n\n")
-            stability_text.insert("end", f"Taxed Return Std Dev: {param_stability.get('taxed_return_std', 0):.4f}\n")
-            stability_text.insert("end", f"Better Off Std Dev: {param_stability.get('better_off_std', 0):.4f}\n")
-            stability_text.insert("end", f"Win Rate Std Dev: {param_stability.get('win_rate_std', 0):.4f}\n")
-            stability_text.insert("end", f"Taxed Return Max-Min Diff: {param_stability.get('taxed_return_max_min_diff', 0):.4f}\n")
-            stability_text.config(state="disabled")
-        else:
-            ttk.Label(stability_tab, text="No parameter stability data available").pack(pady=20)
+        # Parameter stability tab (only show for non-walk-forward results)
+        # Walk-forward only uses the best combo, so no parameter stability data exists
+        if not (has_wf and result.get("walk_forward_mode", False)):
+            stability_tab = ttk.Frame(detail_notebook)
+            detail_notebook.add(stability_tab, text="Parameter Stability")
+            
+            param_stability = result.get("param_stability", {})
+            if param_stability:
+                stability_text = tk.Text(stability_tab, wrap="word", padx=20, pady=20)
+                stability_text.pack(fill="both", expand=True)
+                stability_text.insert("1.0", "Parameter Stability Metrics:\n\n")
+                stability_text.insert("end", f"Taxed Return Std Dev: {param_stability.get('taxed_return_std', 0):.4f}\n")
+                stability_text.insert("end", f"Better Off Std Dev: {param_stability.get('better_off_std', 0):.4f}\n")
+                stability_text.insert("end", f"Win Rate Std Dev: {param_stability.get('win_rate_std', 0):.4f}\n")
+                stability_text.insert("end", f"Taxed Return Max-Min Diff: {param_stability.get('taxed_return_max_min_diff', 0):.4f}\n")
+                stability_text.config(state="disabled")
+            else:
+                ttk.Label(stability_tab, text="No parameter stability data available").pack(pady=20)
         
         # Helper function to create a trades tab with tree view
         def create_trades_tab(tab_name):
@@ -3579,6 +3626,7 @@ def view_batch_results():
                             'BuyPrice': current_buy.get('Price', 0),
                             'SellPrice': trade.get('Price', 0),
                             'PreTaxReturn': trade.get('PreTaxReturn', 0),
+                            'PreTaxCumReturn': trade.get('PreTaxCumReturn', 0),
                             'HoldTime': hold_time,
                             'GainDollars': gain_dollars,
                             'SMA_A': current_buy.get('SMA_A', trade.get('SMA_A', '')),
@@ -3718,6 +3766,7 @@ def view_batch_results():
                                     'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                     'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
                                     'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                                    'PreTaxCumReturn': f"{trade.get('PreTaxCumReturn', 0):.2%}",
                                     'HoldTime': trade.get('HoldTime', 0),
                                     'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                     'SMA_A': trade.get('SMA_A', ''),
@@ -3726,7 +3775,7 @@ def view_batch_results():
                     
                     if all_trades:
                         columns = ['Segment', 'Training Period', 'Walk-Forward Test Period', 'Trade Date', 'BuyDate', 'SellDate', 
-                                  'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 'GainDollars', 'SMA_A', 'SMA_B']
+                                  'BuyPrice', 'SellPrice', 'PreTaxReturn', 'PreTaxCumReturn', 'HoldTime', 'GainDollars', 'SMA_A', 'SMA_B']
                         trades_detail_tree["columns"] = columns
                         for col in columns:
                             trades_detail_tree.heading(col, text=col)
@@ -3815,6 +3864,7 @@ def view_batch_results():
                         'BuyPrice': f"{buy_price:.2f}" if isinstance(buy_price, (int, float)) else str(buy_price),
                         'SellPrice': f"{sell_price:.2f}" if isinstance(sell_price, (int, float)) else str(sell_price),
                         'PreTaxReturn': f"{trade.get('PreTaxReturn', trade.get('PreTaxReturn', 0)):.2%}",
+                        'PreTaxCumReturn': f"{trade.get('PreTaxCumReturn', trade.get('PreTaxCumReturn', 0)):.2%}",
                         'HoldTime': trade.get('HoldTime', trade.get('hold_time', 0)),
                         'GainDollars': f"${trade.get('GainDollars', trade.get('gain_dollars', 0)):.2f}",
                         'SMA_A': trade.get('SMA_A', trade.get('sma_a', '')),
@@ -3823,7 +3873,7 @@ def view_batch_results():
                 
                 # Set up columns
                 columns = ['BuyDate', 'SellDate', 
-                          'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
+                          'BuyPrice', 'SellPrice', 'PreTaxReturn', 'PreTaxCumReturn', 'HoldTime', 
                           'GainDollars', 'SMA_A', 'SMA_B']
                 tree["columns"] = columns
                 for col in columns:
@@ -3902,6 +3952,7 @@ def view_batch_results():
                             'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                             'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
                             'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                            'PreTaxCumReturn': f"{trade.get('PreTaxCumReturn', 0):.2%}",
                             'HoldTime': trade.get('HoldTime', 0),
                             'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                             'SMA_A': trade.get('SMA_A', ''),
@@ -3912,11 +3963,13 @@ def view_batch_results():
                     all_trades.append({
                         'Period': '────────────────────────────────────',
                         'BuyDate': '', 'SellDate': '',
-                        'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '',
+                        'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '', 'PreTaxCumReturn': '',
                         'HoldTime': '', 'GainDollars': '', 'SMA_A': '', 'SMA_B': ''
                     })
                 
                 if walk_forward_trades and len(walk_forward_trades) > 0:
+                    # Calculate cumulative return separately for walk-forward trades (starting from 0)
+                    wf_cum_return = 0.0
                     for trade in walk_forward_trades:
                         if isinstance(trade.get('BuyDate'), datetime):
                             buy_date = trade['BuyDate'].strftime('%Y-%m-%d')
@@ -3926,13 +3979,24 @@ def view_batch_results():
                             sell_date = trade['SellDate'].strftime('%Y-%m-%d')
                         else:
                             sell_date = str(trade.get('SellDate', ''))
+                        
+                        # Calculate cumulative return for this walk-forward trade
+                        pre_tax_return = trade.get('PreTaxReturn', 0)
+                        if isinstance(pre_tax_return, str):
+                            # If it's already formatted as percentage, convert back
+                            pre_tax_return = float(pre_tax_return.replace('%', '')) / 100
+                        elif not isinstance(pre_tax_return, (int, float)):
+                            pre_tax_return = 0.0
+                        wf_cum_return = (wf_cum_return + 1) * (pre_tax_return + 1) - 1
+                        
                         all_trades.append({
                             'Period': 'Walk-Forward Test',
                             'BuyDate': buy_date,
                             'SellDate': sell_date,
                             'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                             'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                            'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                            'PreTaxReturn': f"{pre_tax_return:.2%}",
+                            'PreTaxCumReturn': f"{wf_cum_return:.2%}",
                             'HoldTime': trade.get('HoldTime', 0),
                             'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                             'SMA_A': trade.get('SMA_A', ''),
@@ -3940,7 +4004,7 @@ def view_batch_results():
                         })
                 
                 columns = ['Period', 'BuyDate', 'SellDate', 
-                          'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
+                          'BuyPrice', 'SellPrice', 'PreTaxReturn', 'PreTaxCumReturn', 'HoldTime', 
                           'GainDollars', 'SMA_A', 'SMA_B']
                 trades_detail_tree["columns"] = columns
                 for col in columns:
@@ -3969,8 +4033,18 @@ def view_batch_results():
                     trades_detail_tree.column(col, anchor="center", width=100)
                 
                 for trade in best_trades:
-                    values = [str(trade.get(col, '')) for col in columns]
-                    trades_detail_tree.insert("", "end", values=values)
+                    # Format PreTaxReturn and PreTaxCumReturn as percentages
+                    formatted_values = []
+                    for col in columns:
+                        value = trade.get(col, '')
+                        if col == 'PreTaxReturn' or col == 'PreTaxCumReturn':
+                            if isinstance(value, (int, float)):
+                                formatted_values.append(f"{value:.2%}")
+                            else:
+                                formatted_values.append(str(value))
+                        else:
+                            formatted_values.append(str(value))
+                    trades_detail_tree.insert("", "end", values=formatted_values)
                 
                 trades_status_label.config(text=f"Showing {len(best_trades)} trades")
             else:
@@ -4892,6 +4966,7 @@ def view_cached_backtests():
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
                                 'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                                'PreTaxCumReturn': f"{trade.get('PreTaxCumReturn', 0):.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -4903,12 +4978,14 @@ def view_cached_backtests():
                         all_trades.append({
                             'Period': '────────────────────────────────────',
                             'Trade Date': '', 'BuyDate': '', 'SellDate': '',
-                            'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '',
+                            'BuyPrice': '', 'SellPrice': '', 'PreTaxReturn': '', 'PreTaxCumReturn': '',
                             'HoldTime': '', 'GainDollars': '', 'SMA_A': '', 'SMA_B': ''
                         })
                     
                     # Add walk-forward trades
                     if walk_forward_trades:
+                        # Calculate cumulative return separately for walk-forward trades (starting from 0)
+                        wf_cum_return = 0.0
                         for trade in walk_forward_trades:
                             # Format dates
                             if isinstance(trade.get('Date'), datetime):
@@ -4926,6 +5003,13 @@ def view_cached_backtests():
                             else:
                                 sell_date = str(trade.get('SellDate', ''))
                             
+                            # Calculate cumulative return for this walk-forward trade
+                            pre_tax_return = trade.get('PreTaxReturn', 0)
+                            if isinstance(pre_tax_return, str):
+                                # If it's already formatted as percentage, convert back
+                                pre_tax_return = float(pre_tax_return.replace('%', '')) / 100
+                            wf_cum_return = (wf_cum_return + 1) * (pre_tax_return + 1) - 1
+                            
                             all_trades.append({
                                 'Period': 'WALK-FORWARD TEST',
                                 'Trade Date': trade_date,
@@ -4933,7 +5017,8 @@ def view_cached_backtests():
                                 'SellDate': sell_date,
                                 'BuyPrice': f"{trade.get('BuyPrice', 0):.2f}",
                                 'SellPrice': f"{trade.get('SellPrice', 0):.2f}",
-                                'PreTaxReturn': f"{trade.get('PreTaxReturn', 0):.2%}",
+                                'PreTaxReturn': f"{pre_tax_return:.2%}",
+                                'PreTaxCumReturn': f"{wf_cum_return:.2%}",
                                 'HoldTime': trade.get('HoldTime', 0),
                                 'GainDollars': f"${trade.get('GainDollars', 0):.2f}",
                                 'SMA_A': trade.get('SMA_A', ''),
@@ -4943,7 +5028,7 @@ def view_cached_backtests():
                     if all_trades:
                         # Set up columns
                         columns = ['Period', 'Trade Date', 'BuyDate', 'SellDate', 
-                                  'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 
+                                  'BuyPrice', 'SellPrice', 'PreTaxReturn', 'PreTaxCumReturn', 'HoldTime', 
                                   'GainDollars', 'SMA_A', 'SMA_B']
                         trades_tree["columns"] = columns
                         for col in columns:
@@ -5047,7 +5132,7 @@ def view_cached_backtests():
                 if all_trades:
                     # Set up columns
                     columns = ['Segment', 'Training Period', 'Walk-Forward Test Period', 'Trade Date', 'BuyDate', 'SellDate', 
-                              'BuyPrice', 'SellPrice', 'PreTaxReturn', 'HoldTime', 'GainDollars', 'SMA_A', 'SMA_B']
+                              'BuyPrice', 'SellPrice', 'PreTaxReturn', 'PreTaxCumReturn', 'HoldTime', 'GainDollars', 'SMA_A', 'SMA_B']
                     trades_tree["columns"] = columns
                     for col in columns:
                         trades_tree.heading(col, text=col)

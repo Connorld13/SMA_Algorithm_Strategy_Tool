@@ -58,8 +58,12 @@ def calculate_backtest_score(result: Dict[str, Any], scoring_config: Dict[str, A
     scores["win_rate"] = win_rate_score * weights.get("win_rate", 0.15)
     
     # 4. Max Drawdown Score (lower is better, so invert)
+    # If drawdown exceeds threshold, score = 0. Otherwise, linear scale from 1.0 (0% drawdown) to 0.0 (at threshold)
     max_drawdown_threshold = thresholds.get("max_drawdown_bad", 0.5)  # 50% drawdown = bad
-    max_drawdown_score = max(0.0, 1.0 - (max_drawdown / max_drawdown_threshold))
+    if max_drawdown >= max_drawdown_threshold:
+        max_drawdown_score = 0.0
+    else:
+        max_drawdown_score = 1.0 - (max_drawdown / max_drawdown_threshold)
     scores["max_drawdown"] = max_drawdown_score * weights.get("max_drawdown", 0.10)
     
     # 5. Trade Count Score (optimal range, not too few, not too many)
@@ -68,9 +72,13 @@ def calculate_backtest_score(result: Dict[str, Any], scoring_config: Dict[str, A
     trade_count_optimal = thresholds.get("trade_count_optimal", 20)
     
     if trade_count < trade_count_min:
-        trade_count_score = trade_count / trade_count_min
+        # Below minimum threshold: score = 0 (no partial credit)
+        trade_count_score = 0.0
     elif trade_count > trade_count_max:
-        trade_count_score = max(0.0, 1.0 - ((trade_count - trade_count_max) / trade_count_max))
+        # Above maximum: gradually reduce score based on how much it exceeds max
+        # Use a reasonable penalty - if it's 2x the max, score approaches 0
+        excess_ratio = (trade_count - trade_count_max) / trade_count_max
+        trade_count_score = max(0.0, 1.0 - excess_ratio)
     else:
         # Within range, score based on proximity to optimal
         distance_from_optimal = abs(trade_count - trade_count_optimal)
@@ -94,17 +102,28 @@ def calculate_backtest_score(result: Dict[str, Any], scoring_config: Dict[str, A
     scores["hold_time"] = hold_time_score * weights.get("hold_time", 0.05)
     
     # 7. Stability Scores (lower std and max-min diff is better)
-    # Taxed Return Stability
+    # If std exceeds threshold, score = 0. Otherwise, linear scale from 1.0 (0% std) to 0.0 (at threshold)
     stability_threshold = thresholds.get("stability_threshold", 0.1)  # 10% std = bad
-    taxed_return_stability_score = max(0.0, 1.0 - (taxed_return_std / stability_threshold))
+    
+    # Taxed Return Stability
+    if taxed_return_std >= stability_threshold:
+        taxed_return_stability_score = 0.0
+    else:
+        taxed_return_stability_score = 1.0 - (taxed_return_std / stability_threshold)
     scores["taxed_return_stability"] = taxed_return_stability_score * weights.get("taxed_return_stability", 0.10)
     
     # Better Off Stability
-    better_off_stability_score = max(0.0, 1.0 - (better_off_std / stability_threshold))
+    if better_off_std >= stability_threshold:
+        better_off_stability_score = 0.0
+    else:
+        better_off_stability_score = 1.0 - (better_off_std / stability_threshold)
     scores["better_off_stability"] = better_off_stability_score * weights.get("better_off_stability", 0.05)
     
     # Win Rate Stability
-    win_rate_stability_score = max(0.0, 1.0 - (win_rate_std / stability_threshold))
+    if win_rate_std >= stability_threshold:
+        win_rate_stability_score = 0.0
+    else:
+        win_rate_stability_score = 1.0 - (win_rate_std / stability_threshold)
     scores["win_rate_stability"] = win_rate_stability_score * weights.get("win_rate_stability", 0.05)
     
     # Total score (sum of all weighted scores, scaled to 0-10)
@@ -218,7 +237,12 @@ def calculate_backtest_score_breakdown(result: Dict[str, Any], scoring_config: D
     
     # 4. Max Drawdown
     max_drawdown_threshold = thresholds.get("max_drawdown_bad", 0.2)
-    max_drawdown_norm = max(0.0, 1.0 - (max_drawdown / max_drawdown_threshold))
+    if max_drawdown >= max_drawdown_threshold:
+        max_drawdown_norm = 0.0
+        max_drawdown_explanation = f"{max_drawdown:.2%} drawdown ≥ {max_drawdown_threshold:.0%} bad threshold = 0.0"
+    else:
+        max_drawdown_norm = 1.0 - (max_drawdown / max_drawdown_threshold)
+        max_drawdown_explanation = f"1.0 - ({max_drawdown:.2%} ÷ {max_drawdown_threshold:.0%}) = {max_drawdown_norm:.2f}"
     max_drawdown_weight = weights.get("max_drawdown", 0.10)
     max_drawdown_contribution = max_drawdown_norm * max_drawdown_weight
     raw_values["max_drawdown"] = max_drawdown
@@ -230,7 +254,7 @@ def calculate_backtest_score_breakdown(result: Dict[str, Any], scoring_config: D
         "normalized_score": max_drawdown_norm,
         "weight": max_drawdown_weight,
         "contribution": max_drawdown_contribution,
-        "explanation": f"1.0 - ({max_drawdown:.2%} drawdown ÷ {max_drawdown_threshold:.0%} bad threshold) = {max_drawdown_norm:.2f} × {max_drawdown_weight:.0%} weight = {max_drawdown_contribution:.3f} pts"
+        "explanation": f"{max_drawdown_explanation} × {max_drawdown_weight:.0%} weight = {max_drawdown_contribution:.3f} pts"
     })
     
     # 5. Trade Count
@@ -239,10 +263,13 @@ def calculate_backtest_score_breakdown(result: Dict[str, Any], scoring_config: D
     trade_count_optimal = thresholds.get("trade_count_optimal", 60)
     
     if trade_count < trade_count_min:
-        trade_count_norm = trade_count / trade_count_min
-        trade_count_explanation = f"{trade_count} trades ÷ {trade_count_min} min = {trade_count_norm:.2f}"
+        # Below minimum threshold: score = 0 (no partial credit)
+        trade_count_norm = 0.0
+        trade_count_explanation = f"{trade_count} trades < {trade_count_min} min threshold = 0.0"
     elif trade_count > trade_count_max:
-        trade_count_norm = max(0.0, 1.0 - ((trade_count - trade_count_max) / trade_count_max))
+        # Above maximum: gradually reduce score based on how much it exceeds max
+        excess_ratio = (trade_count - trade_count_max) / trade_count_max
+        trade_count_norm = max(0.0, 1.0 - excess_ratio)
         trade_count_explanation = f"1.0 - (({trade_count} - {trade_count_max}) ÷ {trade_count_max}) = {trade_count_norm:.2f}"
     else:
         distance_from_optimal = abs(trade_count - trade_count_optimal)
@@ -296,7 +323,12 @@ def calculate_backtest_score_breakdown(result: Dict[str, Any], scoring_config: D
     stability_threshold = thresholds.get("stability_threshold", 0.08)
     
     # Taxed Return Stability
-    taxed_return_stability_norm = max(0.0, 1.0 - (taxed_return_std / stability_threshold))
+    if taxed_return_std >= stability_threshold:
+        taxed_return_stability_norm = 0.0
+        taxed_return_stability_explanation = f"{taxed_return_std:.4f} std ≥ {stability_threshold:.0%} bad threshold = 0.0"
+    else:
+        taxed_return_stability_norm = 1.0 - (taxed_return_std / stability_threshold)
+        taxed_return_stability_explanation = f"1.0 - ({taxed_return_std:.4f} ÷ {stability_threshold:.0%}) = {taxed_return_stability_norm:.2f}"
     taxed_return_stability_weight = weights.get("taxed_return_stability", 0.08)
     taxed_return_stability_contribution = taxed_return_stability_norm * taxed_return_stability_weight
     raw_values["taxed_return_stability"] = taxed_return_std
@@ -308,11 +340,16 @@ def calculate_backtest_score_breakdown(result: Dict[str, Any], scoring_config: D
         "normalized_score": taxed_return_stability_norm,
         "weight": taxed_return_stability_weight,
         "contribution": taxed_return_stability_contribution,
-        "explanation": f"1.0 - ({taxed_return_std:.4f} std ÷ {stability_threshold:.0%} bad threshold) = {taxed_return_stability_norm:.2f} × {taxed_return_stability_weight:.0%} weight = {taxed_return_stability_contribution:.3f} pts"
+        "explanation": f"{taxed_return_stability_explanation} × {taxed_return_stability_weight:.0%} weight = {taxed_return_stability_contribution:.3f} pts"
     })
     
     # Better Off Stability
-    better_off_stability_norm = max(0.0, 1.0 - (better_off_std / stability_threshold))
+    if better_off_std >= stability_threshold:
+        better_off_stability_norm = 0.0
+        better_off_stability_explanation = f"{better_off_std:.4f} std ≥ {stability_threshold:.0%} bad threshold = 0.0"
+    else:
+        better_off_stability_norm = 1.0 - (better_off_std / stability_threshold)
+        better_off_stability_explanation = f"1.0 - ({better_off_std:.4f} ÷ {stability_threshold:.0%}) = {better_off_stability_norm:.2f}"
     better_off_stability_weight = weights.get("better_off_stability", 0.03)
     better_off_stability_contribution = better_off_stability_norm * better_off_stability_weight
     raw_values["better_off_stability"] = better_off_std
@@ -324,11 +361,16 @@ def calculate_backtest_score_breakdown(result: Dict[str, Any], scoring_config: D
         "normalized_score": better_off_stability_norm,
         "weight": better_off_stability_weight,
         "contribution": better_off_stability_contribution,
-        "explanation": f"1.0 - ({better_off_std:.4f} std ÷ {stability_threshold:.0%} bad threshold) = {better_off_stability_norm:.2f} × {better_off_stability_weight:.0%} weight = {better_off_stability_contribution:.3f} pts"
+        "explanation": f"{better_off_stability_explanation} × {better_off_stability_weight:.0%} weight = {better_off_stability_contribution:.3f} pts"
     })
     
     # Win Rate Stability
-    win_rate_stability_norm = max(0.0, 1.0 - (win_rate_std / stability_threshold))
+    if win_rate_std >= stability_threshold:
+        win_rate_stability_norm = 0.0
+        win_rate_stability_explanation = f"{win_rate_std:.4f} std ≥ {stability_threshold:.0%} bad threshold = 0.0"
+    else:
+        win_rate_stability_norm = 1.0 - (win_rate_std / stability_threshold)
+        win_rate_stability_explanation = f"1.0 - ({win_rate_std:.4f} ÷ {stability_threshold:.0%}) = {win_rate_stability_norm:.2f}"
     win_rate_stability_weight = weights.get("win_rate_stability", 0.07)
     win_rate_stability_contribution = win_rate_stability_norm * win_rate_stability_weight
     raw_values["win_rate_stability"] = win_rate_std
@@ -340,7 +382,7 @@ def calculate_backtest_score_breakdown(result: Dict[str, Any], scoring_config: D
         "normalized_score": win_rate_stability_norm,
         "weight": win_rate_stability_weight,
         "contribution": win_rate_stability_contribution,
-        "explanation": f"1.0 - ({win_rate_std:.4f} std ÷ {stability_threshold:.0%} bad threshold) = {win_rate_stability_norm:.2f} × {win_rate_stability_weight:.0%} weight = {win_rate_stability_contribution:.3f} pts"
+        "explanation": f"{win_rate_stability_explanation} × {win_rate_stability_weight:.0%} weight = {win_rate_stability_contribution:.3f} pts"
     })
     
     # Calculate total

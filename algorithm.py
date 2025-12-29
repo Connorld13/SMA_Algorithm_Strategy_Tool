@@ -689,7 +689,7 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
                 'DateNum': stocks.at[i, 'Date'].toordinal(),
                 'Price': sell_price,
                 'PreTaxReturn': pre_tax_return,
-                'PreTaxCumReturn': 0.0,
+                'PreTaxCumReturn': 0.0,  # Will be calculated below
                 'HoldTime': hold_time,
                 'Date': stocks.at[i, 'Date'],
                 'PreTaxLiquidity': current_liquidity if compounding else (start_amount + running_pnl),
@@ -719,12 +719,30 @@ def run_algorithm(data, start_amount=10000, progress_callback=None, compounding=
                 'DateNum': stocks.at[numrows - 1, 'Date'].toordinal(),
                 'Price': sell_price,
                 'PreTaxReturn': pre_tax_return,
-                'PreTaxCumReturn': 0.0,
+                'PreTaxCumReturn': 0.0,  # Will be calculated below
                 'HoldTime': hold_time,
                 'Date': stocks.at[numrows - 1, 'Date'],
                 'PreTaxLiquidity': current_liquidity if compounding else (start_amount + running_pnl),
                 'PreTax Running P/L': profit_dollars
             })
+
+    # Calculate PreTaxCumReturn for besttrades
+    if besttrades:
+        # Convert to DataFrame for easier manipulation
+        besttrades_df = pd.DataFrame(besttrades)
+        
+        # Initialize cumulative return
+        pre_tax_cum_return = 0.0
+        
+        # Update cumulative returns for sell trades
+        for idx_trade, row_trade in besttrades_df.iterrows():
+            if row_trade['Buy/Sell'] == -1:  # Sell trade
+                trade_return = row_trade['PreTaxReturn']
+                pre_tax_cum_return = (pre_tax_cum_return + 1) * (trade_return + 1) - 1
+                besttrades_df.at[idx_trade, 'PreTaxCumReturn'] = pre_tax_cum_return
+        
+        # Convert back to list of dictionaries
+        besttrades = besttrades_df.to_dict('records')
 
     # Calculate final metrics for best combination
     sell_trades_final = [t for t in besttrades if t['Buy/Sell'] == -1]
