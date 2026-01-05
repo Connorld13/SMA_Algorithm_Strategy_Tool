@@ -4067,8 +4067,45 @@ def export_batch_to_csv(valid_results):
         if has_walk_forward and result.get("walk_forward_mode", False):
             training_metrics = result.get("training_metrics", {})
             wf_metrics = result.get("walk_forward_metrics", {})
-            training_score = result.get("training_score", 0.0)
-            wf_score = result.get("walk_forward_score", 0.0)
+            
+            # Recalculate scores using current scoring_config (same as ranked results table)
+            training_result = {
+                "outputresults1": {
+                    "besttaxedreturn": training_metrics.get("taxed_return", 0),
+                    "betteroff": training_metrics.get("better_off", 0),
+                    "besttradecount": training_metrics.get("trade_count", 0),
+                    "noalgoreturn": result.get("noalgoreturn", 0)
+                },
+                "outputresults2": {
+                    "winningtradepct": training_metrics.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": training_metrics.get("max_drawdown", 0),
+                    "average_hold_time": training_metrics.get("avg_hold_time", 0)
+                },
+                "param_stability": result.get("param_stability", {})
+            }
+            training_score = scoring.calculate_backtest_score(training_result, scoring_config)
+            
+            wf_result = {
+                "outputresults1": {
+                    "besttaxedreturn": wf_metrics.get("taxed_return", 0),
+                    "betteroff": 0.0,  # Walk-forward doesn't track better_off
+                    "besttradecount": wf_metrics.get("trade_count", 0),
+                    "noalgoreturn": 0.0
+                },
+                "outputresults2": {
+                    "winningtradepct": wf_metrics.get("win_rate", 0),
+                    "maxdrawdown(worst trade return pct)": wf_metrics.get("max_drawdown", 0),
+                    "average_hold_time": wf_metrics.get("avg_hold_time", 0)
+                },
+                "param_stability": {}  # Walk-forward doesn't have param stability
+            }
+            wf_score = scoring.calculate_backtest_score(wf_result, scoring_config)
+            
+            # Calculate combined score using configurable weights
+            combined_weighting = scoring_config.get("combined_score_weighting", {})
+            training_weight = combined_weighting.get("training_weight", 0.4)
+            wf_weight = combined_weighting.get("walk_forward_weight", 0.6)
+            combined_score = training_score * training_weight + wf_score * wf_weight
             
             output1 = result.get("outputresults1", {})
             best_a = output1.get("besta", "")
@@ -4077,6 +4114,7 @@ def export_batch_to_csv(valid_results):
             export_row = {
                 "Symbol": symbol,
                 "Export Date": today_str,
+                "Combined Score": combined_score,
                 "Training Score": training_score,
                 "Walk-Forward Score": wf_score,
                 "Training Taxed Return": training_metrics.get("taxed_return", 0),
@@ -4114,9 +4152,9 @@ def export_batch_to_csv(valid_results):
         
         export_data.append(export_row)
     
-    # Sort by walk forward score or backtest score
+    # Sort by combined score (walk-forward) or backtest score (standard)
     if has_walk_forward:
-        export_data.sort(key=lambda x: x.get("Walk-Forward Score", 0), reverse=True)
+        export_data.sort(key=lambda x: x.get("Combined Score", 0), reverse=True)
     else:
         export_data.sort(key=lambda x: x.get("Backtest Score", 0), reverse=True)
     
@@ -4126,7 +4164,7 @@ def export_batch_to_csv(valid_results):
     
     # Reorder columns to put Rank first
     if has_walk_forward:
-        columns = ["Rank", "Symbol", "Export Date", "Training Score", "Walk-Forward Score",
+        columns = ["Rank", "Symbol", "Export Date", "Combined Score", "Training Score", "Walk-Forward Score",
                   "Training Taxed Return", "Walk-Forward Taxed Return",
                   "Training Win Rate", "Walk-Forward Win Rate",
                   "Training Trade Count", "Walk-Forward Trade Count",
